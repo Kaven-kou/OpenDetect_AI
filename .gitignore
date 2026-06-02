@@ -14,6 +14,8 @@ build/
 # ── 数据目录（向量库 + 对话历史，体积大且是用户私有数据）──
 data/chroma_db/
 data/chat_history.db
+data/chat_history.db-shm
+data/chat_history.db-wal
 
 # ── 缓存 ──────────────────────────────────────────
 .uv-cache/
