@@ -1,0 +1,10 @@
+{
+  "$schema": "https://langgra.ph/schema.json",
+  "python_version": "3.13",
+  "dependencies": ["."],
+  "graphs": {
+    "agent": "opendetect_ai.graph:graph"
+  },
+  "env": ".env",
+  "image_distro": "wolfi"
+}

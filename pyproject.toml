@@ -1,0 +1,47 @@
+[project]
+name = "opendetect_ai"
+version = "0.1.0"
+description = "面向 AI 领域研究者的智能文献管理与问答系统，基于 LangGraph 多智能体工作流，集成 MCP 协议、RAG 检索增强生成与短期/长期记忆机制"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    # 向量数据库
+    "chromadb>=1.5.9",
+    # Web 框架
+    "fastapi>=0.136.0",
+    "uvicorn>=0.47.0",
+    "python-multipart>=0.0.29",
+    # LangChain 生态
+    "langchain>=1.0.0",
+    "langchain-chroma>=1.1.0",
+    "langchain-community>=0.4.1",
+    "langchain-mcp-adapters>=0.2.2",
+    "langchain-openai>=1.2.1",
+    "langchain-text-splitters>=1.1.2",
+    # LangGraph
+    "langgraph>=1.0.0",
+    "langgraph-checkpoint-sqlite>=3.1.0",
+    # MCP 协议
+    "mcp>=1.27.1",
+    # PDF 解析
+    "pymupdf>=1.27.2.3",
+    # 工具
+    "python-dotenv>=1.0.1",
+    "requests>=2.33.0",
+]
+ 
+[build-system]
+requires = ["uv_build>=0.8.15,<0.9.0"]
+build-backend = "uv_build"
+ 
+[dependency-groups]
+dev = [
+    "anyio>=4.7.0",
+    "langgraph-cli[inmem]>=0.4.10",
+    "pytest>=8.3.5",
+    "ruff>=0.8.0",
+]
+ 
+[tool.uv.build-backend]
+module-name = "opendetect_ai"
+source-include = ["langgraph.json", ".env.example", "Makefile", "tests/**"]

@@ -1,0 +1,99 @@
+问题1:INFO:     127.0.0.1:51119 - "GET / HTTP/1.1" 200 OK INFO:     127.0.0.1:60335 - "GET /favicon.ico HTTP/1.1" 404 Not Found INFO:     127.0.0.1:51119 - "GET /api/papers HTTP/1.1" 200 OK,问题2:能不能前端agent的回复做成流式输出,等的时间太长让用户体感不好,问题三:如图,感觉我问一些其他的问题感觉agent回答的不是很好,为什么啊?感觉他并不能理解我的语义:[会话 thread_1779962137071] 第 5 轮对话
+
+用户问题: 帮我搜索一下VILD、GLIP论文,帮我入库
+
+向量库已有论文: 20 篇
+
+==================================================
+
+[Supervisor] → search  理由: 用户要求搜索VILD和GLIP论文且搜索尚未执行过,需先调用search查找论文
+
+[Search] 意图: arxiv_id → '2104.13921,2112.03857'  (VILD(ViLD)和GLIP论文)
+
+[Search] ArXiv MCP 查询: 2104.13921,2112.03857
+
+[Search] ArXiv MCP 失败,回退 OpenAlex: {'error': 'Error: arXiv is rate limiting this IP. Please wait 60 seconds before retrying.'}
+
+[Supervisor] → FINISH  理由: 当前轮次已有错误信息,结束工作流并返回错误。
+
+==================================================
+
+工作流完成,最终输出:
+
+==================================================
+
+[错误信息]
+
+未找到与'帮我搜索一下VILD、GLIP论文,帮我入库'相关的论文
+
+==================================================
+[会话 thread_1779962137071] 第 6 轮对话
+用户问题: 你好
+向量库已有论文: 20 篇
+==================================================
+
+[Supervisor] → FINISH  理由: 用户只是打招呼，没有论文检索或分析需求，直接结束任务
+
+==================================================
+工作流完成，最终输出：
+==================================================
+
+[已入库论文列表]
+  1. Attention mechanisms in computer vision: A survey (2022-03-15) arxiv:2111.07624
+  2. DINOv2: Learning Robust Visual Features without Supervision (2023-04-14) arxiv:2304.07193
+  3. Visual attention network (2023-07-28) arxiv:无
+  4. PVT v2: Improved baselines with pyramid vision transformer (2022-03-16) arxiv:2106.13797
+  5. PCT: Point cloud transformer (2021-04-09) arxiv:2012.09688
+  6. AI-Assisted Pipeline for Dynamic Generation of Trustworthy Health Supplement Content at Scale (2018-10-11) arxiv:1810.04805
+  7. Segment anything in medical images (2024-01-22) arxiv:无
+  8. Accurate medium-range global weather forecasting with 3D neural networks (2023-07-05) arxiv:无
+  9. Diffusion Models: A Comprehensive Survey of Methods and Applications (2022-09-02) arxiv:2209.00796
+  10. Temporal networks (2012-03-06) arxiv:无
+  11. An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale (2020-10-22) arxiv:2010.11929
+  12. Attention Is All You Need (2025-08-23) arxiv:1706.03762
+  13. CORA: Adapting CLIP for Open-Vocabulary Detection with Region Prompting and Anchor Pre-Matching () arxiv:无
+  14. Swin Transformer: Hierarchical Vision Transformer using Shifted Windows (2021-03-25) arxiv:2103.14030
+  15. PMC-CLIP: Contrastive Language-Image Pre-training using Biomedical Documents (2023-03-13) arxiv:2303.07240
+  16. Toward a Holistic Evaluation of Robustness in CLIP Models (2024-10-02) arxiv:2410.01534
+  17. Chinese CLIP: Contrastive Vision-Language Pretraining in Chinese (2022-11-02) arxiv:2211.01335
+  18. Adapting Contrastive Language-Image Pretrained (CLIP) Models for Out-of-Distribution Detection (2023-03-10) arxiv:2303.05828
+  19. CLIP in Medical Imaging: A Survey (2023-12-12) arxiv:2312.07353
+  20. DisCo-CLIP: A Distributed Contrastive Loss for Memory Efficient CLIP Training (2023-04-17) arxiv:2304.08480
+INFO:     127.0.0.1:56796 - "POST /api/chat HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56796 - "GET /api/papers HTTP/1.1" 200 OK
+
+==================================================
+[会话 thread_1779962137071] 第 7 轮对话
+用户问题: 你是谁
+向量库已有论文: 20 篇
+==================================================
+
+[Supervisor] → FINISH  理由: 用户询问身份，属于一般对话，无需检索或分析论文，任务已完成
+
+==================================================
+工作流完成，最终输出：
+==================================================
+
+[已入库论文列表]
+  1. Attention mechanisms in computer vision: A survey (2022-03-15) arxiv:2111.07624
+  2. DINOv2: Learning Robust Visual Features without Supervision (2023-04-14) arxiv:2304.07193
+  3. Visual attention network (2023-07-28) arxiv:无
+  4. PVT v2: Improved baselines with pyramid vision transformer (2022-03-16) arxiv:2106.13797
+  5. PCT: Point cloud transformer (2021-04-09) arxiv:2012.09688
+  6. AI-Assisted Pipeline for Dynamic Generation of Trustworthy Health Supplement Content at Scale (2018-10-11) arxiv:1810.04805
+  7. Segment anything in medical images (2024-01-22) arxiv:无
+  8. Accurate medium-range global weather forecasting with 3D neural networks (2023-07-05) arxiv:无
+  9. Diffusion Models: A Comprehensive Survey of Methods and Applications (2022-09-02) arxiv:2209.00796
+  10. Temporal networks (2012-03-06) arxiv:无
+  11. An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale (2020-10-22) arxiv:2010.11929
+  12. Attention Is All You Need (2025-08-23) arxiv:1706.03762
+  13. CORA: Adapting CLIP for Open-Vocabulary Detection with Region Prompting and Anchor Pre-Matching () arxiv:无
+  14. Swin Transformer: Hierarchical Vision Transformer using Shifted Windows (2021-03-25) arxiv:2103.14030
+  15. PMC-CLIP: Contrastive Language-Image Pre-training using Biomedical Documents (2023-03-13) arxiv:2303.07240
+  16. Toward a Holistic Evaluation of Robustness in CLIP Models (2024-10-02) arxiv:2410.01534
+  17. Chinese CLIP: Contrastive Vision-Language Pretraining in Chinese (2022-11-02) arxiv:2211.01335
+  18. Adapting Contrastive Language-Image Pretrained (CLIP) Models for Out-of-Distribution Detection (2023-03-10) arxiv:2303.05828
+  19. CLIP in Medical Imaging: A Survey (2023-12-12) arxiv:2312.07353
+  20. DisCo-CLIP: A Distributed Contrastive Loss for Memory Efficient CLIP Training (2023-04-17) arxiv:2304.08480
+INFO:     127.0.0.1:51770 - "POST /api/chat HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51770 - "GET /api/papers HTTP/1.1" 200 OK

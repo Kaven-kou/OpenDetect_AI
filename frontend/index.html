@@ -1,0 +1,1407 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OpenDetect AI — 智能文献研究助手</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,500;0,600;1,400&family=Plus+Jakarta+Sans:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.6/marked.min.js"></script>
+<style>
+/* ═══════════════════════════════════════════════
+   TOKENS — warm scholarly light theme
+═══════════════════════════════════════════════ */
+:root {
+  --bg:           #f5f2ec;
+  --surface:      #faf8f4;
+  --card:         #ffffff;
+  --elevated:     #f0ece3;
+  --border:       #e4ddd0;
+  --border-hi:    #cec5b4;
+
+  --ink:          #1e1a14;
+  --ink-2:        #4a4234;
+  --ink-3:        #8a7d6a;
+  --ink-4:        #b8ad9e;
+
+  --amber:        #b8621a;
+  --amber-bright: #d4761f;
+  --amber-pale:   #f5ead8;
+  --amber-border: #e8c898;
+  --amber-text:   #8a4810;
+
+  --teal:         #1a6b72;
+  --teal-pale:    #dff0f2;
+  --teal-border:  #a8d4d8;
+
+  --green:        #2a7a4a;
+  --green-pale:   #e0f2e8;
+  --green-border: #a8d8bc;
+
+  --red:          #c0362a;
+  --red-pale:     #fce8e6;
+  --red-border:   #f0b0aa;
+
+  --blue:         #1a58a8;
+  --blue-pale:    #e0eaf8;
+  --blue-border:  #a8c0e8;
+
+  --shadow-sm:    0 1px 4px rgba(30,26,20,0.08), 0 2px 12px rgba(30,26,20,0.05);
+  --shadow:       0 2px 8px rgba(30,26,20,0.1), 0 6px 24px rgba(30,26,20,0.07);
+  --shadow-lg:    0 8px 32px rgba(30,26,20,0.12), 0 2px 8px rgba(30,26,20,0.08);
+
+  --sidebar-w:    268px;
+  --radius:       10px;
+  --radius-sm:    6px;
+  --radius-lg:    14px;
+
+  --font-serif: 'Lora', Georgia, serif;
+  --font-sans:  'Plus Jakarta Sans', system-ui, sans-serif;
+  --font-mono:  'JetBrains Mono', monospace;
+  --ease-out:   cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* ═══════════════════════════════════════════════
+   RESET
+═══════════════════════════════════════════════ */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; overflow: hidden; }
+body {
+  font-family: var(--font-sans);
+  background: var(--bg);
+  color: var(--ink);
+  display: flex;
+  font-size: 14px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+button { cursor: pointer; border: none; background: none; font-family: inherit; font-size: inherit; color: inherit; }
+input, textarea { font-family: inherit; font-size: inherit; color: inherit; }
+svg { display: block; flex-shrink: 0; }
+
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-hi); border-radius: 99px; }
+::-webkit-scrollbar-thumb:hover { background: var(--ink-4); }
+
+/* ═══════════════════════════════════════════════
+   SIDEBAR
+═══════════════════════════════════════════════ */
+#sidebar {
+  width: var(--sidebar-w);
+  min-width: var(--sidebar-w);
+  height: 100vh;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.sidebar-logo {
+  padding: 18px 16px 15px;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  border-bottom: 1px solid var(--border);
+}
+.logo-icon {
+  width: 36px; height: 36px;
+  background: var(--amber-pale);
+  border: 1.5px solid var(--amber-border);
+  border-radius: 9px;
+  display: grid; place-items: center;
+  flex-shrink: 0;
+}
+.logo-title {
+  font-family: var(--font-serif);
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--ink);
+  letter-spacing: 0.01em;
+  line-height: 1.2;
+}
+.logo-sub {
+  font-size: 10px;
+  color: var(--ink-4);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  margin-top: 1px;
+}
+
+.btn-new-chat {
+  margin: 12px 12px 8px;
+  padding: 9px 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--amber);
+  border-radius: var(--radius-sm);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 500;
+  transition: background 0.15s, transform 0.1s;
+  box-shadow: 0 2px 8px rgba(184,98,26,0.25);
+}
+.btn-new-chat:hover { background: var(--amber-bright); }
+.btn-new-chat:active { transform: scale(0.97); }
+
+.thread-section-label {
+  padding: 8px 18px 4px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--ink-4);
+}
+.thread-list { flex: 1; overflow-y: auto; padding: 3px 8px; }
+
+.thread-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.12s;
+  position: relative;
+}
+.thread-item:hover { background: var(--elevated); }
+.thread-item.active {
+  background: var(--amber-pale);
+  border: 1px solid var(--amber-border);
+}
+.thread-icon {
+  width: 28px; height: 28px;
+  background: var(--elevated);
+  border-radius: 6px;
+  display: grid; place-items: center;
+  flex-shrink: 0;
+  color: var(--ink-3);
+  transition: color 0.12s, background 0.12s;
+}
+.thread-item.active .thread-icon { background: var(--amber-pale); color: var(--amber); }
+.thread-meta { flex: 1; min-width: 0; }
+.thread-name {
+  font-size: 13px;
+  color: var(--ink-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: color 0.12s;
+}
+.thread-item.active .thread-name { color: var(--amber-text); font-weight: 500; }
+.thread-time { font-size: 10px; color: var(--ink-4); margin-top: 1px; }
+.thread-del {
+  width: 22px; height: 22px;
+  border-radius: 4px;
+  display: none;
+  place-items: center;
+  color: var(--ink-4);
+  flex-shrink: 0;
+  transition: background 0.1s, color 0.1s;
+}
+.thread-item:hover .thread-del { display: grid; }
+.thread-del:hover { background: var(--red-pale); color: var(--red); }
+
+.thread-empty {
+  padding: 24px 18px;
+  text-align: center;
+  color: var(--ink-4);
+  font-size: 12px;
+  line-height: 1.9;
+}
+
+.sidebar-footer {
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+}
+.btn-library {
+  width: 100%;
+  padding: 9px 12px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  border-radius: var(--radius-sm);
+  color: var(--ink-2);
+  font-size: 13px;
+  font-weight: 500;
+  transition: background 0.12s, color 0.12s;
+}
+.btn-library:hover { background: var(--elevated); color: var(--ink); }
+.paper-badge {
+  margin-left: auto;
+  background: var(--border);
+  color: var(--ink-3);
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 99px;
+  min-width: 22px;
+  text-align: center;
+  transition: background 0.2s, color 0.2s;
+}
+.paper-badge.has-papers { background: var(--amber-pale); color: var(--amber-text); border: 1px solid var(--amber-border); }
+
+/* ═══════════════════════════════════════════════
+   MAIN
+═══════════════════════════════════════════════ */
+#main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+  position: relative;
+  background: var(--bg);
+}
+
+.chat-header {
+  padding: 0 24px;
+  height: 50px;
+  display: flex;
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  gap: 10px;
+  background: var(--surface);
+}
+.chat-header-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 0 2px var(--green-pale);
+  flex-shrink: 0;
+  transition: background 0.3s, box-shadow 0.3s;
+}
+.chat-header-dot.thinking { background: var(--amber); box-shadow: 0 0 0 2px var(--amber-pale); animation: pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+.chat-header-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chat-header-id {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-4);
+  flex-shrink: 0;
+}
+
+/* ═══════════════════════════════════════════════
+   MESSAGES
+═══════════════════════════════════════════════ */
+.messages-container { flex: 1; overflow-y: auto; overflow-x: hidden; background: var(--bg); }
+.messages {
+  max-width: 820px;
+  margin: 0 auto;
+  padding: 28px 28px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+
+/* Welcome */
+.welcome {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 56px 28px 40px;
+  text-align: center;
+  gap: 0;
+}
+.welcome-emblem {
+  width: 68px; height: 68px;
+  background: var(--amber-pale);
+  border: 1.5px solid var(--amber-border);
+  border-radius: 20px;
+  display: grid; place-items: center;
+  margin-bottom: 20px;
+  box-shadow: var(--shadow-sm);
+}
+.welcome-title {
+  font-family: var(--font-serif);
+  font-size: 28px;
+  font-weight: 600;
+  color: var(--ink);
+  letter-spacing: 0.01em;
+  margin-bottom: 8px;
+}
+.welcome-sub {
+  font-size: 14px;
+  color: var(--ink-3);
+  max-width: 380px;
+  line-height: 1.75;
+  margin-bottom: 32px;
+}
+.suggestion-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  width: 100%;
+  max-width: 580px;
+}
+.suggestion-card {
+  padding: 14px 16px;
+  background: var(--card);
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, box-shadow 0.15s, transform 0.1s;
+  box-shadow: var(--shadow-sm);
+}
+.suggestion-card:hover {
+  border-color: var(--amber-border);
+  background: var(--amber-pale);
+  box-shadow: var(--shadow);
+  transform: translateY(-1px);
+}
+.suggestion-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  font-weight: 700;
+  color: var(--amber-text);
+  margin-bottom: 5px;
+}
+.suggestion-text { font-size: 12.5px; color: var(--ink-2); line-height: 1.55; }
+
+/* Message base */
+.msg {
+  display: flex;
+  flex-direction: column;
+  animation: msgIn 0.2s var(--ease-out) both;
+}
+@keyframes msgIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* User */
+.msg-user { align-items: flex-end; }
+.msg-user .msg-bubble {
+  background: var(--ink);
+  color: #f5f0e8;
+  border-radius: var(--radius-lg) var(--radius-lg) 4px var(--radius-lg);
+  padding: 10px 16px;
+  max-width: 70%;
+  font-size: 14px;
+  line-height: 1.65;
+  box-shadow: var(--shadow-sm);
+}
+.msg-user .msg-time { font-size: 10px; color: var(--ink-4); margin-top: 5px; padding-right: 4px; }
+
+/* AI */
+.msg-ai { align-items: flex-start; }
+.msg-ai-inner { display: flex; align-items: flex-start; gap: 12px; max-width: 94%; }
+.msg-avatar {
+  width: 32px; height: 32px;
+  border-radius: 9px;
+  background: var(--amber-pale);
+  border: 1.5px solid var(--amber-border);
+  display: grid; place-items: center;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.msg-ai-content { flex: 1; min-width: 0; }
+.msg-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  padding: 3px 9px 3px 7px;
+  border-radius: 99px;
+  margin-bottom: 7px;
+  border: 1.5px solid;
+}
+.badge-rag    { background: var(--blue-pale);  color: var(--blue);  border-color: var(--blue-border); }
+.badge-report { background: var(--amber-pale); color: var(--amber-text); border-color: var(--amber-border); }
+.badge-ingest { background: var(--green-pale); color: var(--green); border-color: var(--green-border); }
+.badge-search { background: var(--elevated);   color: var(--ink-2); border-color: var(--border); }
+.badge-error  { background: var(--red-pale);   color: var(--red);   border-color: var(--red-border); }
+.badge-info   { background: var(--elevated);   color: var(--ink-2); border-color: var(--border); }
+.badge-upload { background: var(--teal-pale);  color: var(--teal);  border-color: var(--teal-border); }
+.think-panel { margin: 6px 0 2px 0; }
+.think-toggle {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 12px; color: var(--ink-3); cursor: pointer;
+  background: none; border: none; padding: 2px 0;
+  font-family: inherit;
+}
+.think-toggle:hover { color: var(--ink-2); }
+.think-toggle svg { transition: transform 0.2s; flex-shrink:0; }
+.think-toggle.open svg { transform: rotate(90deg); }
+.think-body {
+  display: none; margin-top: 6px;
+  border-left: 2px solid var(--border);
+  padding: 6px 10px; border-radius: 0 4px 4px 0;
+  background: var(--elevated);
+}
+.think-body.open { display: block; }
+.think-line {
+  font-size: 12px; color: var(--ink-3);
+  line-height: 1.7; font-family: var(--font-mono, monospace);
+  white-space: pre-wrap; word-break: break-all;
+}
+.think-line + .think-line { margin-top: 2px; }
+@keyframes think-pulse { 0%,100%{opacity:.4} 50%{opacity:1} }
+.think-dot {
+  display:inline-block; width:5px; height:5px; border-radius:50%;
+  background: var(--amber); animation: think-pulse 1.2s ease-in-out infinite;
+  margin-right: 4px; vertical-align: middle;
+}
+
+.msg-bubble-ai {
+  background: var(--card);
+  border: 1.5px solid var(--border);
+  border-radius: 4px var(--radius-lg) var(--radius-lg) var(--radius-lg);
+  padding: 14px 18px;
+  font-size: 14px;
+  line-height: 1.72;
+  color: var(--ink);
+  box-shadow: var(--shadow-sm);
+}
+.msg-type-rag    .msg-bubble-ai { border-top-color: var(--blue); }
+.msg-type-report .msg-bubble-ai { border-top-color: var(--amber); }
+.msg-type-ingest .msg-bubble-ai { border-top-color: var(--green); }
+.msg-type-error  .msg-bubble-ai { background: var(--red-pale); border-color: var(--red-border); border-top-color: var(--red); }
+.msg-type-upload .msg-bubble-ai { border-top-color: var(--teal); }
+.msg-ai .msg-time { font-size: 10px; color: var(--ink-4); margin-top: 5px; padding-left: 44px; }
+
+/* Markdown */
+.md-content h1 { font-family: var(--font-serif); font-size: 21px; font-weight: 600; color: var(--ink); margin: 0 0 14px; }
+.md-content h2 { font-family: var(--font-serif); font-size: 17px; font-weight: 600; color: var(--ink); margin: 18px 0 10px; padding-bottom: 6px; border-bottom: 1.5px solid var(--border); }
+.md-content h3 { font-size: 14.5px; font-weight: 600; color: var(--ink); margin: 14px 0 8px; }
+.md-content p  { margin: 0 0 10px; color: var(--ink); }
+.md-content p:last-child { margin-bottom: 0; }
+.md-content ul, .md-content ol { padding-left: 20px; margin: 0 0 10px; }
+.md-content li { margin: 5px 0; color: var(--ink); }
+.md-content strong { font-weight: 600; color: var(--ink); }
+.md-content em { color: var(--ink-2); font-style: italic; }
+.md-content code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--amber-pale);
+  color: var(--amber-text);
+  padding: 1px 5px;
+  border-radius: 4px;
+  border: 1px solid var(--amber-border);
+}
+.md-content pre {
+  background: var(--elevated);
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px 16px;
+  margin: 10px 0;
+  overflow-x: auto;
+}
+.md-content pre code { background: none; border: none; padding: 0; color: var(--ink-2); }
+.md-content blockquote {
+  border-left: 3px solid var(--amber-border);
+  padding: 4px 14px;
+  margin: 10px 0;
+  color: var(--ink-3);
+  font-style: italic;
+  background: var(--amber-pale);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+.md-content table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 13px; }
+.md-content th {
+  background: var(--elevated);
+  padding: 8px 12px;
+  text-align: left;
+  font-weight: 600;
+  color: var(--ink);
+  border: 1px solid var(--border-hi);
+  white-space: nowrap;
+}
+.md-content td { padding: 7px 12px; border: 1px solid var(--border); color: var(--ink-2); vertical-align: top; }
+.md-content tr:hover td { background: var(--amber-pale); }
+.md-content hr { border: none; border-top: 1.5px solid var(--border); margin: 16px 0; }
+
+/* Typing */
+.typing-dots { display: flex; align-items: center; gap: 5px; height: 20px; }
+.typing-dots span {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--ink-4);
+  animation: dot-pulse 1.2s ease-in-out infinite;
+}
+.typing-dots span:nth-child(2) { animation-delay: 0.2s; }
+.typing-dots span:nth-child(3) { animation-delay: 0.4s; }
+@keyframes dot-pulse { 0%,80%,100% { transform: scale(0.65); opacity: 0.35; } 40% { transform: scale(1); opacity: 1; } }
+
+/* ═══════════════════════════════════════════════
+   DRAG OVERLAY
+═══════════════════════════════════════════════ */
+.drag-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 100;
+  display: none;
+  place-items: center;
+  background: rgba(245,242,236,0.9);
+  backdrop-filter: blur(4px);
+  border: 2.5px dashed var(--amber-border);
+  border-radius: var(--radius);
+  margin: 8px;
+  animation: overlayIn 0.15s var(--ease-out);
+}
+@keyframes overlayIn { from { opacity: 0; } to { opacity: 1; } }
+.drag-overlay.active { display: grid; }
+.drag-overlay-inner {
+  display: flex; flex-direction: column; align-items: center; gap: 14px; pointer-events: none;
+}
+.drag-overlay-title { font-family: var(--font-serif); font-size: 22px; font-weight: 600; color: var(--amber); }
+.drag-overlay-sub { font-size: 13px; color: var(--ink-3); }
+
+/* ═══════════════════════════════════════════════
+   INPUT AREA
+═══════════════════════════════════════════════ */
+.input-area {
+  padding: 12px 20px 16px;
+  border-top: 1.5px solid var(--border);
+  background: var(--surface);
+  flex-shrink: 0;
+}
+.staged-file {
+  display: none;
+  align-items: center;
+  gap: 8px;
+  background: var(--teal-pale);
+  border: 1.5px solid var(--teal-border);
+  border-radius: var(--radius-sm);
+  padding: 7px 12px;
+  margin-bottom: 10px;
+  animation: msgIn 0.15s var(--ease-out);
+}
+.staged-file.visible { display: flex; }
+.staged-file-name { font-size: 13px; font-weight: 500; color: var(--teal); flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.staged-file-size { font-size: 11px; font-family: var(--font-mono); color: var(--ink-4); flex-shrink: 0; }
+.staged-title-input {
+  background: transparent;
+  border: none;
+  border-bottom: 1.5px solid var(--teal-border);
+  padding: 0 4px;
+  color: var(--ink-2);
+  font-size: 12px;
+  width: 180px;
+  outline: none;
+}
+.staged-title-input::placeholder { color: var(--ink-4); }
+.staged-clear {
+  width: 20px; height: 20px;
+  border-radius: 4px;
+  color: var(--ink-4);
+  display: grid; place-items: center;
+  flex-shrink: 0;
+  transition: background 0.1s, color 0.1s;
+}
+.staged-clear:hover { background: var(--red-pale); color: var(--red); }
+
+.input-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  background: var(--card);
+  border: 1.5px solid var(--border-hi);
+  border-radius: var(--radius);
+  padding: 8px 8px 8px 12px;
+  transition: border-color 0.15s, box-shadow 0.15s;
+  box-shadow: var(--shadow-sm);
+}
+.input-row:focus-within {
+  border-color: var(--amber-border);
+  box-shadow: 0 0 0 3px rgba(184,98,26,0.1), var(--shadow-sm);
+}
+.upload-btn {
+  width: 30px; height: 30px;
+  display: grid; place-items: center;
+  border-radius: 6px;
+  color: var(--ink-4);
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+  flex-shrink: 0;
+  align-self: flex-end;
+  margin-bottom: 2px;
+}
+.upload-btn:hover { background: var(--elevated); color: var(--ink-2); }
+.textarea-wrap { flex: 1; }
+#queryInput {
+  width: 100%;
+  background: transparent;
+  border: none;
+  outline: none;
+  resize: none;
+  font-size: 14px;
+  color: var(--ink);
+  line-height: 1.6;
+  max-height: 160px;
+  overflow-y: auto;
+  padding: 5px 0;
+}
+#queryInput::placeholder { color: var(--ink-4); }
+.send-btn {
+  width: 34px; height: 34px;
+  background: var(--amber);
+  border-radius: 8px;
+  display: grid; place-items: center;
+  color: #fff;
+  flex-shrink: 0;
+  transition: background 0.15s, transform 0.1s;
+  align-self: flex-end;
+  box-shadow: 0 2px 8px rgba(184,98,26,0.3);
+}
+.send-btn:hover { background: var(--amber-bright); }
+.send-btn:active { transform: scale(0.92); }
+.send-btn:disabled { background: var(--border); color: var(--ink-4); cursor: not-allowed; box-shadow: none; }
+.input-hint { margin-top: 7px; font-size: 10px; color: var(--ink-4); text-align: center; letter-spacing: 0.02em; }
+.input-hint kbd {
+  font-family: var(--font-mono);
+  background: var(--elevated);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0 4px;
+  font-size: 10px;
+  color: var(--ink-3);
+}
+
+/* ═══════════════════════════════════════════════
+   LIBRARY PANEL
+═══════════════════════════════════════════════ */
+.library-backdrop {
+  position: fixed; inset: 0; z-index: 200;
+  background: rgba(30,26,20,0.3);
+  backdrop-filter: blur(2px);
+  opacity: 0; pointer-events: none;
+  transition: opacity 0.25s;
+}
+.library-backdrop.open { opacity: 1; pointer-events: all; }
+
+.library-panel {
+  position: fixed;
+  top: 0; right: 0;
+  width: 440px; height: 100vh;
+  background: var(--surface);
+  border-left: 1.5px solid var(--border);
+  z-index: 201;
+  display: flex; flex-direction: column;
+  transform: translateX(100%);
+  transition: transform 0.3s var(--ease-out);
+  box-shadow: var(--shadow-lg);
+}
+.library-panel.open { transform: translateX(0); }
+
+.library-header {
+  padding: 18px 20px 14px;
+  border-bottom: 1.5px solid var(--border);
+  display: flex; align-items: center; justify-content: space-between;
+  flex-shrink: 0;
+  background: var(--amber-pale);
+}
+.library-header-left { display: flex; align-items: center; gap: 10px; }
+.library-title { font-family: var(--font-serif); font-size: 18px; font-weight: 600; color: var(--ink); }
+.library-count {
+  font-size: 11px; font-weight: 700; color: var(--amber-text);
+  background: #fff; border: 1.5px solid var(--amber-border);
+  padding: 2px 9px; border-radius: 99px;
+}
+.library-close {
+  width: 30px; height: 30px; border-radius: 6px;
+  display: grid; place-items: center; color: var(--ink-3);
+  transition: background 0.1s, color 0.1s;
+}
+.library-close:hover { background: var(--red-pale); color: var(--red); }
+
+.library-search {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.library-search-input {
+  width: 100%;
+  padding: 7px 12px;
+  background: var(--card);
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  color: var(--ink);
+  outline: none;
+  transition: border-color 0.15s;
+}
+.library-search-input:focus { border-color: var(--amber-border); }
+.library-search-input::placeholder { color: var(--ink-4); }
+
+.library-body { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 8px; }
+.library-empty {
+  flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  color: var(--ink-3); font-size: 13px; gap: 10px; text-align: center; padding: 40px;
+}
+
+.paper-card {
+  background: var(--card);
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  transition: border-color 0.15s, box-shadow 0.15s, transform 0.1s;
+  animation: msgIn 0.15s var(--ease-out) both;
+  box-shadow: var(--shadow-sm);
+}
+.paper-card:hover { border-color: var(--amber-border); box-shadow: var(--shadow); transform: translateY(-1px); }
+.paper-title { font-size: 13.5px; font-weight: 500; color: var(--ink); line-height: 1.5; margin-bottom: 9px; }
+.paper-meta { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.paper-id {
+  font-family: var(--font-mono); font-size: 10px; color: var(--amber-text);
+  background: var(--amber-pale); padding: 2px 8px; border-radius: 99px;
+  border: 1px solid var(--amber-border);
+}
+.paper-date { font-size: 11px; color: var(--ink-4); }
+.paper-link { font-size: 10.5px; color: var(--blue); text-decoration: none; opacity: 0.85; transition: opacity 0.1s; }
+.paper-link:hover { opacity: 1; text-decoration: underline; }
+
+.library-footer {
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+  display: flex; justify-content: space-between; align-items: center;
+  font-size: 11px; color: var(--ink-4);
+}
+.btn-refresh {
+  font-size: 12px; color: var(--ink-3);
+  display: flex; align-items: center; gap: 5px;
+  padding: 5px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--card);
+  transition: background 0.1s, color 0.1s;
+}
+.btn-refresh:hover { background: var(--elevated); color: var(--ink); }
+</style>
+</head>
+<body>
+
+<!-- SIDEBAR -->
+<aside id="sidebar">
+  <div class="sidebar-logo">
+    <div class="logo-icon">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#b8621a" stroke-width="1.8" stroke-linecap="round">
+        <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/>
+        <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/>
+      </svg>
+    </div>
+    <div>
+      <div class="logo-title">OpenDetect</div>
+      <div class="logo-sub">AI · 文献研究助手</div>
+    </div>
+  </div>
+
+  <button class="btn-new-chat" onclick="createThread()">
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+      <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+    </svg>
+    新建会话
+  </button>
+
+  <div class="thread-section-label">会话历史</div>
+  <div class="thread-list" id="threadList"></div>
+
+  <div class="sidebar-footer">
+    <button class="btn-library" onclick="openLibrary()">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+        <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+        <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+      </svg>
+      <span>文献库</span>
+      <span class="paper-badge" id="paperBadge">0</span>
+    </button>
+  </div>
+</aside>
+
+<!-- MAIN -->
+<main id="main">
+  <div class="chat-header">
+    <div class="chat-header-dot" id="statusDot"></div>
+    <span class="chat-header-title" id="chatHeaderTitle">选择或创建一个会话开始研究</span>
+    <span class="chat-header-id" id="chatHeaderId"></span>
+  </div>
+
+  <div class="messages-container">
+    <div class="messages" id="messages"></div>
+  </div>
+
+  <!-- Drag overlay -->
+  <div class="drag-overlay" id="dragOverlay">
+    <div class="drag-overlay-inner">
+      <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="#b8621a" stroke-width="1.5" stroke-linecap="round">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+        <polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+      </svg>
+      <div class="drag-overlay-title">拖放 PDF 文件</div>
+      <div class="drag-overlay-sub">释放以添加到入库队列</div>
+    </div>
+  </div>
+
+  <!-- Input -->
+  <div class="input-area">
+    <div class="staged-file" id="stagedFile">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#1a6b72" stroke-width="2" stroke-linecap="round">
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+        <polyline points="14 2 14 8 20 8"/>
+      </svg>
+      <span class="staged-file-name" id="stagedFileName"></span>
+      <span class="staged-file-size" id="stagedFileSize"></span>
+      <input type="text" class="staged-title-input" id="stagedTitleInput" placeholder="论文标题（可选）">
+      <button class="staged-clear" onclick="clearStagedFile()">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+          <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+      </button>
+    </div>
+
+    <div class="input-row">
+      <label class="upload-btn" title="上传本地 PDF 文件">
+        <input type="file" id="fileInput" accept=".pdf" style="display:none" onchange="onFileInput(event)">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
+        </svg>
+      </label>
+      <div class="textarea-wrap">
+        <textarea id="queryInput"
+          placeholder="向 Agent 提问、粘贴 arXiv 链接、或将 PDF 拖入此处…"
+          rows="1"
+          onkeydown="onKeyDown(event)"
+          oninput="autoResize(this)"
+        ></textarea>
+      </div>
+      <button class="send-btn" id="sendBtn" onclick="onSend()" title="发送 (Enter)">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
+        </svg>
+      </button>
+    </div>
+    <div class="input-hint">
+      <kbd>Enter</kbd> 发送 &nbsp;·&nbsp; <kbd>Shift+Enter</kbd> 换行 &nbsp;·&nbsp; 支持拖入 PDF 入库
+    </div>
+  </div>
+</main>
+
+<!-- LIBRARY PANEL -->
+<div class="library-backdrop" id="libraryBackdrop" onclick="closeLibrary()"></div>
+<div class="library-panel" id="libraryPanel">
+  <div class="library-header">
+    <div class="library-header-left">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#b8621a" stroke-width="1.8" stroke-linecap="round">
+        <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+        <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+      </svg>
+      <span class="library-title">文献库</span>
+      <span class="library-count" id="libraryCount">0 篇</span>
+    </div>
+    <button class="library-close" onclick="closeLibrary()">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+        <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+      </svg>
+    </button>
+  </div>
+  <div class="library-search">
+    <input class="library-search-input" id="librarySearch" placeholder="搜索已入库论文标题…" oninput="filterLibrary(this.value)">
+  </div>
+  <div class="library-body" id="libraryBody">
+    <div class="library-empty">
+      <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round">
+        <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+        <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+      </svg>
+      <div>向量库为空</div>
+      <div style="font-size:11px;color:var(--ink-4)">搜索并入库论文后将在此显示</div>
+    </div>
+  </div>
+  <div class="library-footer">
+    <span id="libraryFilterNote"></span>
+    <button class="btn-refresh" onclick="refreshLibrary()">
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/>
+        <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+      </svg>
+      刷新
+    </button>
+  </div>
+</div>
+
+<script>
+'use strict';
+const API_BASE = '';
+const STORE_KEY = 'opendetect_v3';
+
+let state = { threads: [], activeId: null, isLoading: false, stagedFile: null, papers: [] };
+
+marked.setOptions({ breaks: true, gfm: true });
+
+// ── Persistence ──────────────────────────────────────────────
+function loadState() {
+  try {
+    const r = localStorage.getItem(STORE_KEY);
+    if (r) { const s = JSON.parse(r); state.threads = s.threads || []; state.activeId = s.activeId || null; }
+  } catch(e) {}
+}
+function saveState() {
+  try { localStorage.setItem(STORE_KEY, JSON.stringify({ threads: state.threads, activeId: state.activeId })); } catch(e) {}
+}
+
+// ── Threads ──────────────────────────────────────────────────
+function getActive() { return state.threads.find(t => t.id === state.activeId) || null; }
+
+function createThread() {
+  const id = 'thread_' + Date.now();
+  state.threads.unshift({ id, name: '新会话', createdAt: new Date().toISOString(), messages: [] });
+  state.activeId = id;
+  saveState(); renderSidebar(); renderMessages();
+  document.getElementById('queryInput').focus();
+}
+
+function switchThread(id) {
+  if (id === state.activeId) return;
+  state.activeId = id; saveState(); renderSidebar(); renderMessages(); scrollToBottom();
+}
+
+function deleteThread(id, e) {
+  e.stopPropagation();
+  if (!confirm('删除该会话？')) return;
+  state.threads = state.threads.filter(t => t.id !== id);
+  if (state.activeId === id) state.activeId = state.threads.length ? state.threads[0].id : null;
+  saveState(); renderSidebar(); renderMessages();
+}
+
+function addMessage(threadId, msg) {
+  const t = state.threads.find(t => t.id === threadId);
+  if (!t) return;
+  t.messages.push(msg);
+  if (msg.role === 'user' && t.name === '新会话') t.name = msg.content.slice(0, 28) + (msg.content.length > 28 ? '…' : '');
+  saveState();
+}
+
+// ── Render sidebar ───────────────────────────────────────────
+function renderSidebar() {
+  const list = document.getElementById('threadList');
+  if (!state.threads.length) {
+    list.innerHTML = `<div class="thread-empty">还没有会话<br>点击「新建会话」开始研究</div>`; return;
+  }
+  list.innerHTML = state.threads.map(t => {
+    const active = t.id === state.activeId ? 'active' : '';
+    return `<div class="thread-item ${active}" onclick="switchThread('${t.id}')">
+      <div class="thread-icon">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+        </svg>
+      </div>
+      <div class="thread-meta">
+        <div class="thread-name">${escHtml(t.name)}</div>
+        <div class="thread-time">${formatRelTime(t.createdAt)}</div>
+      </div>
+      <button class="thread-del" onclick="deleteThread('${t.id}',event)" title="删除">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+          <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+      </button>
+    </div>`;
+  }).join('');
+}
+
+// ── Render messages ──────────────────────────────────────────
+function renderMessages() {
+  const thread = getActive();
+  const el = document.getElementById('messages');
+  const header = document.getElementById('chatHeaderTitle');
+  const hid = document.getElementById('chatHeaderId');
+  if (!thread) {
+    header.textContent = '选择或创建一个会话开始研究';
+    hid.textContent = '';
+    el.innerHTML = renderWelcome(); return;
+  }
+  header.textContent = thread.name;
+  hid.textContent = thread.id.replace('thread_','#');
+  if (!thread.messages.length) { el.innerHTML = renderWelcome(); return; }
+  el.innerHTML = thread.messages.map(renderMsg).join('');
+  scrollToBottom();
+}
+
+function renderWelcome() {
+  return `<div class="welcome">
+    <div class="welcome-emblem">
+      <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#b8621a" stroke-width="1.6" stroke-linecap="round">
+        <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/>
+        <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/>
+      </svg>
+    </div>
+    <div class="welcome-title">OpenDetect AI</div>
+    <div class="welcome-sub">基于 LangGraph 多智能体工作流的学术文献研究助手<br>支持论文检索、PDF 入库、RAG 问答与综述生成</div>
+    <div class="suggestion-grid">
+      <div class="suggestion-card" onclick="fillInput('帮我搜索首次提出 ViT 的论文')">
+        <div class="suggestion-label">精确搜索</div>
+        <div class="suggestion-text">帮我搜索首次提出 ViT 的论文</div>
+      </div>
+      <div class="suggestion-card" onclick="fillInput('帮我找几篇 diffusion model 相关论文')">
+        <div class="suggestion-label">方向搜索</div>
+        <div class="suggestion-text">帮我找几篇 diffusion model 相关论文</div>
+      </div>
+      <div class="suggestion-card" onclick="fillInput('帮我入库这篇论文 https://arxiv.org/abs/1706.03762')">
+        <div class="suggestion-label">链接入库</div>
+        <div class="suggestion-text">帮我入库 arxiv.org/abs/1706.03762</div>
+      </div>
+      <div class="suggestion-card" onclick="fillInput('Swin Transformer 相比 ViT 做了哪些改进？')">
+        <div class="suggestion-label">RAG 问答</div>
+        <div class="suggestion-text">Swin Transformer 相比 ViT 做了哪些改进？</div>
+      </div>
+    </div>
+  </div>`;
+}
+
+function renderMsg(msg) {
+  const time = formatTime(msg.timestamp);
+  if (msg.role === 'user') {
+    return `<div class="msg msg-user">
+      <div class="msg-bubble">${escHtml(msg.content).replace(/\n/g,'<br>')}</div>
+      <div class="msg-time">${time}</div>
+    </div>`;
+  }
+  const { badge, cls } = getMsgStyle(msg.type);
+  const body = (msg.type === 'rag' || msg.type === 'report' || msg.type === 'ingest' || msg.type === 'search' || msg.type === 'upload' || msg.type === 'info')
+    ? `<div class="md-content">${marked.parse(msg.content || '')}</div>`
+    : `<div style="color:var(--red)">${escHtml(msg.content||'').replace(/\n/g,'<br>')}</div>`;
+  return `<div class="msg msg-ai msg-type-${msg.type||'info'}">
+    <div class="msg-ai-inner">
+      <div class="msg-avatar">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#b8621a" stroke-width="1.8" stroke-linecap="round">
+          <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/>
+          <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/>
+        </svg>
+      </div>
+      <div class="msg-ai-content">
+        <div class="msg-badge ${badge.cls}">${badge.svg} ${badge.label}</div>
+        <div class="msg-bubble-ai">${body}</div>
+      </div>
+    </div>
+    <div class="msg-time">${time}</div>
+  </div>`;
+}
+
+function getMsgStyle(type) {
+  const defs = {
+    rag:    { cls:'badge-rag',    label:'RAG 回答', svg:`<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>` },
+    report: { cls:'badge-report', label:'综述报告', svg:`<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>` },
+    ingest: { cls:'badge-ingest', label:'入库完成', svg:`<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>` },
+    search: { cls:'badge-search', label:'搜索结果', svg:`<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>` },
+    error:  { cls:'badge-error',  label:'发生错误', svg:`<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>` },
+    upload: { cls:'badge-upload', label:'PDF 入库', svg:`<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>` },
+    info:   { cls:'badge-info',   label:'助手回复', svg:`<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>` },
+  };
+  const t = type || 'info';
+  return { badge: defs[t] || defs.info, cls: t };
+}
+
+function showLoading() {
+  const el = document.getElementById('messages');
+  const div = document.createElement('div');
+  div.id = 'loadingMsg';
+  div.className = 'msg msg-ai msg-type-info';
+  div.innerHTML = `<div class="msg-ai-inner">
+    <div class="msg-avatar">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#b8621a" stroke-width="1.8" stroke-linecap="round">
+        <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/>
+        <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/>
+      </svg>
+    </div>
+    <div class="msg-ai-content">
+      <div class="msg-badge badge-info">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+          <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+        </svg> AGENT 思考中
+      </div>
+      <div class="think-panel" id="thinkPanel">
+        <button class="think-toggle open" id="thinkToggle" onclick="toggleThink()">
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <span class="think-dot"></span><span id="thinkStatus">正在思考...</span>
+        </button>
+        <div class="think-body open" id="thinkBody"></div>
+      </div>
+      <div class="msg-bubble-ai"><div class="typing-dots"><span></span><span></span><span></span></div></div>
+    </div>
+  </div>`;
+  el.appendChild(div);
+  scrollToBottom();
+}
+function removeLoading() { const el = document.getElementById('loadingMsg'); if (el) el.remove(); }
+function updateLoadingStep(message) {
+  const status = document.getElementById('thinkStatus');
+  if (status) status.textContent = message;
+}
+function addThinkLine(message) {
+  const body = document.getElementById('thinkBody');
+  if (!body) return;
+  const line = document.createElement('div');
+  line.className = 'think-line';
+  line.textContent = message;
+  body.appendChild(line);
+  body.scrollTop = body.scrollHeight;
+  scrollToBottom();
+}
+function toggleThink() {
+  const toggle = document.getElementById('thinkToggle');
+  const body = document.getElementById('thinkBody');
+  if (!toggle || !body) return;
+  toggle.classList.toggle('open');
+  body.classList.toggle('open');
+}
+function collapseThink() {
+  const toggle = document.getElementById('thinkToggle');
+  const body = document.getElementById('thinkBody');
+  const status = document.getElementById('thinkStatus');
+  if (toggle) toggle.classList.remove('open');
+  if (body) body.classList.remove('open');
+  if (status) status.textContent = '已完成，点击查看过程';
+}
+
+// ── API ───────────────────────────────────────────────────────
+async function apiChatStream(query, threadId, onStep, onDone, onError, onThink) {
+  const res = await fetch(`${API_BASE}/api/chat/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query, thread_id: threadId }),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const parts = buffer.split('\n\n');
+    buffer = parts.pop();
+    for (const part of parts) {
+      if (!part.startsWith('data: ')) continue;
+      try {
+        const data = JSON.parse(part.slice(6));
+        if (data.type === 'step') onStep(data);
+        else if (data.type === 'think') { if (onThink) onThink(data); }
+        else if (data.type === 'error') onError(data);
+        else onDone(data);  // 'done'/'info'/'rag'/'report'/'ingest'/'search' 都是最终结果
+      } catch(e) {}
+    }
+  }
+}
+async function apiUploadPDF(file, title='') {
+  const fd = new FormData();
+  fd.append('file', file); fd.append('title', title);
+  const res = await fetch(`${API_BASE}/api/upload-pdf`, { method:'POST', body:fd });
+  if (!res.ok) { const e = await res.json().catch(()=>({})); throw new Error(e.detail || `HTTP ${res.status}`); }
+  return res.json();
+}
+async function apiFetchPapers() {
+  const res = await fetch(`${API_BASE}/api/papers`);
+  return res.json();
+}
+
+// ── Send ──────────────────────────────────────────────────────
+async function onSend() {
+  if (state.isLoading) return;
+  const input = document.getElementById('queryInput');
+  const query = input.value.trim();
+  if (!query && !state.stagedFile) return;
+  if (!state.activeId) createThread();
+  const threadId = state.activeId;
+  input.value = ''; autoResize(input);
+  setLoading(true);
+  try {
+    if (state.stagedFile) await handlePDFUpload(threadId);
+    if (query) await handleChatQuery(query, threadId);
+  } catch(e) {
+    removeLoading();
+    addMessage(threadId, { role:'assistant', type:'error', content:`请求失败：${e.message}\n\n请确认后端服务是否已启动：\n\`uvicorn api:app --reload\``, timestamp: new Date().toISOString() });
+    renderMessages();
+  } finally { setLoading(false); refreshPaperCount(); }
+}
+
+async function handleChatQuery(query, threadId) {
+  addMessage(threadId, { role:'user', content:query, timestamp:new Date().toISOString() });
+  const el = document.getElementById('messages');
+  const t = getActive();
+  if (t) { const d = document.createElement('div'); d.innerHTML = renderMsg(t.messages[t.messages.length-1]); el.appendChild(d.firstElementChild); }
+  renderSidebar(); showLoading(); scrollToBottom();
+
+  let result = null;
+  await apiChatStream(
+    query, threadId,
+    (step) => { updateLoadingStep(step.message); },
+    (done) => {
+      console.log('[SSE done]', done);
+      collapseThink();
+      result = done;
+    },
+    (err)  => {
+      console.warn('[SSE error]', err);
+      result = { type: 'error', answer: err.answer || '请求失败' };
+    },
+    (think) => { addThinkLine(think.message); }
+  );
+
+  removeLoading();
+  // answer 可能是空字符串，做更严格的判断
+  const answer = (result && result.answer && result.answer.trim()) ? result.answer : null;
+  // type 字段现在是 SSE 协议标识（'done'/'step'/'think'/'error'），用 msg_type 渲染消息样式
+  const msgType = result?.msg_type || result?.type || 'info';
+  const msgContent = answer || '（后端处理完成，但未返回文字回复。请查看控制台 [SSE done] 日志排查。）';
+  addMessage(threadId, { role:'assistant', type:msgType, content:msgContent, timestamp:new Date().toISOString() });
+  renderMessages();
+}
+
+async function handlePDFUpload(threadId) {
+  const file = state.stagedFile;
+  const title = document.getElementById('stagedTitleInput').value.trim();
+  const sizeStr = formatFileSize(file.size);
+  addMessage(threadId, { role:'user', content:`📄 上传本地 PDF：${file.name}（${sizeStr}）${title ? '\n标题：'+title : ''}`, timestamp:new Date().toISOString() });
+  const t = getActive();
+  if (t) { const el = document.getElementById('messages'); const d = document.createElement('div'); d.innerHTML = renderMsg(t.messages[t.messages.length-1]); el.appendChild(d.firstElementChild); }
+  clearStagedFile(); showLoading(); scrollToBottom();
+  const result = await apiUploadPDF(file, title);
+  removeLoading();
+  const content = result.status==='ok'
+    ? (result.skipped ? `**${result.title}** 已在文献库中，跳过重复入库。` : `**${result.title}** 入库成功！\n\n共切分为 **${result.chunks}** 个文本块，已写入向量数据库。`)
+    : `入库失败：${result.message||'未知错误'}`;
+  addMessage(threadId, { role:'assistant', type:result.status==='ok'?'upload':'error', content, timestamp:new Date().toISOString() });
+  renderMessages(); renderSidebar();
+}
+
+// ── Drag & drop ───────────────────────────────────────────────
+function initDragDrop() {
+  const main = document.getElementById('main');
+  const overlay = document.getElementById('dragOverlay');
+  let dc = 0;
+  main.addEventListener('dragenter', e => { e.preventDefault(); if ([...e.dataTransfer.items].some(i=>i.kind==='file')) { dc++; overlay.classList.add('active'); } });
+  main.addEventListener('dragleave', e => { if(--dc<=0){dc=0;overlay.classList.remove('active');} });
+  main.addEventListener('dragover', e => e.preventDefault());
+  main.addEventListener('drop', e => { e.preventDefault(); dc=0; overlay.classList.remove('active'); const files=[...e.dataTransfer.files].filter(f=>f.name.endsWith('.pdf')); if(files.length) stageFile(files[0]); });
+}
+
+// ── File ──────────────────────────────────────────────────────
+function onFileInput(e) { const f=e.target.files[0]; if(f) stageFile(f); e.target.value=''; }
+function stageFile(file) {
+  state.stagedFile = file;
+  document.getElementById('stagedFileName').textContent = file.name;
+  document.getElementById('stagedFileSize').textContent = formatFileSize(file.size);
+  document.getElementById('stagedTitleInput').value = '';
+  document.getElementById('stagedFile').classList.add('visible');
+  document.getElementById('queryInput').focus();
+}
+function clearStagedFile() {
+  state.stagedFile = null;
+  document.getElementById('stagedFile').classList.remove('visible');
+  document.getElementById('stagedTitleInput').value = '';
+}
+
+// ── Library panel ─────────────────────────────────────────────
+async function openLibrary() {
+  document.getElementById('libraryPanel').classList.add('open');
+  document.getElementById('libraryBackdrop').classList.add('open');
+  await refreshLibrary();
+}
+function closeLibrary() {
+  document.getElementById('libraryPanel').classList.remove('open');
+  document.getElementById('libraryBackdrop').classList.remove('open');
+}
+async function refreshLibrary() {
+  document.getElementById('libraryBody').innerHTML = `<div class="library-empty" style="opacity:0.5">加载中…</div>`;
+  try {
+    const data = await apiFetchPapers();
+    state.papers = data.papers || [];
+    renderLibrary(state.papers);
+    updatePaperBadge(state.papers.length);
+  } catch(e) {
+    document.getElementById('libraryBody').innerHTML = `<div class="library-empty" style="color:var(--red)">加载失败：${e.message}</div>`;
+  }
+}
+function renderLibrary(papers) {
+  const count = document.getElementById('libraryCount');
+  count.textContent = `${papers.length} 篇`;
+  const body = document.getElementById('libraryBody');
+  if (!papers.length) {
+    body.innerHTML = `<div class="library-empty">
+      <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round">
+        <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+        <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+      </svg>
+      <div>向量库为空</div>
+      <div style="font-size:11px;color:var(--ink-4)">搜索并入库论文后将在此显示</div>
+    </div>`; return;
+  }
+  body.innerHTML = papers.map((p,i)=>{
+    const id = p.arxiv_id||'';
+    const date = p.published?p.published.slice(0,10):'—';
+    const link = id ? `<a class="paper-link" href="https://arxiv.org/abs/${id}" target="_blank" rel="noopener">↗ arXiv</a>` : '';
+    const idBadge = id ? `<span class="paper-id">${escHtml(id)}</span>` : '';
+    return `<div class="paper-card" style="animation-delay:${i*0.025}s">
+      <div class="paper-title">${escHtml(p.title||'未知标题')}</div>
+      <div class="paper-meta">${idBadge}<span class="paper-date">${date}</span>${link}</div>
+    </div>`;
+  }).join('');
+}
+function filterLibrary(q) {
+  if (!q.trim()) { renderLibrary(state.papers); document.getElementById('libraryFilterNote').textContent=''; return; }
+  const filtered = state.papers.filter(p=>(p.title||'').toLowerCase().includes(q.toLowerCase()));
+  renderLibrary(filtered);
+  document.getElementById('libraryFilterNote').textContent = `显示 ${filtered.length}/${state.papers.length} 篇`;
+}
+async function refreshPaperCount() {
+  try { const d = await apiFetchPapers(); updatePaperBadge((d.papers||[]).length); state.papers = d.papers||[]; } catch(e) {}
+}
+function updatePaperBadge(n) {
+  const b = document.getElementById('paperBadge');
+  b.textContent = n;
+  b.classList.toggle('has-papers', n>0);
+}
+
+// ── Helpers ───────────────────────────────────────────────────
+function onKeyDown(e) { if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();onSend();} }
+function autoResize(el) { el.style.height='auto'; el.style.height=Math.min(el.scrollHeight,160)+'px'; }
+function setLoading(v) {
+  state.isLoading = v;
+  document.getElementById('sendBtn').disabled = v;
+  const dot = document.getElementById('statusDot');
+  dot.classList.toggle('thinking', v);
+}
+function fillInput(text) { if(!state.activeId) createThread(); const el=document.getElementById('queryInput'); el.value=text; el.focus(); autoResize(el); }
+function scrollToBottom() { const el=document.querySelector('.messages-container'); if(el) el.scrollTop=el.scrollHeight; }
+function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function formatTime(iso) { if(!iso) return ''; try { const d=new Date(iso); return d.toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'}); } catch{return '';} }
+function formatRelTime(iso) {
+  if(!iso) return '';
+  try {
+    const diff = Date.now()-new Date(iso).getTime();
+    const m = Math.floor(diff/60000);
+    if(m<1) return '刚刚'; if(m<60) return `${m}分钟前`;
+    const h = Math.floor(m/60);
+    if(h<24) return `${h}小时前`;
+    const days = Math.floor(h/24);
+    return days<30 ? `${days}天前` : new Date(iso).toLocaleDateString('zh-CN',{month:'short',day:'numeric'});
+  } catch{return '';}
+}
+function formatFileSize(b) { if(b<1024) return b+' B'; if(b<1048576) return (b/1024).toFixed(1)+' KB'; return (b/1048576).toFixed(1)+' MB'; }
+
+function init() {
+  loadState();
+  if (state.activeId && !state.threads.find(t=>t.id===state.activeId)) state.activeId = state.threads.length ? state.threads[0].id : null;
+  renderSidebar(); renderMessages(); initDragDrop(); refreshPaperCount();
+}
+init();
+</script>
+</body>
+</html>
