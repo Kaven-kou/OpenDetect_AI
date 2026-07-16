@@ -942,6 +942,16 @@ svg { display: block; flex-shrink: 0; }
 const API_BASE = '';
 const STORE_KEY = 'opendetect_v3';
 
+// 稳定的 user_id：长期记忆按此隔离（浏览器本地生成、持久化）
+const USER_ID = (() => {
+  let id = localStorage.getItem('opendetect_user_id');
+  if (!id) {
+    id = 'u_' + Math.random().toString(36).slice(2, 10);
+    localStorage.setItem('opendetect_user_id', id);
+  }
+  return id;
+})();
+
 let state = { threads: [], activeId: null, isLoading: false, stagedFile: null, papers: [] };
 
 marked.setOptions({ breaks: true, gfm: true });
@@ -1144,6 +1154,18 @@ function updateLoadingStep(message) {
   const status = document.getElementById('thinkStatus');
   if (status) status.textContent = message;
 }
+// 把最终答案的流式 token 逐步渲染进 loading 气泡（思考面板保留在上方）
+function streamTokenIntoLoading(fullText) {
+  const el = document.getElementById('loadingMsg');
+  if (!el) return;
+  const bubble = el.querySelector('.msg-bubble-ai');
+  if (!bubble) return;
+  bubble.classList.add('streaming');
+  bubble.innerHTML = `<div class="md-content">${marked.parse(fullText || '')}</div>`;
+  const status = document.getElementById('thinkStatus');
+  if (status) status.textContent = '正在生成回答...';
+  scrollToBottom();
+}
 function addThinkLine(message) {
   const body = document.getElementById('thinkBody');
   if (!body) return;
@@ -1171,11 +1193,12 @@ function collapseThink() {
 }
 
 // ── API ───────────────────────────────────────────────────────
-async function apiChatStream(query, threadId, onStep, onDone, onError, onThink) {
-  const res = await fetch(`${API_BASE}/api/chat/stream`, {
+// 通用 SSE 读取器：首轮对话与 HITL 恢复共用
+async function streamSSE(url, body, h) {
+  const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query, thread_id: threadId }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const reader = res.body.getReader();
@@ -1191,13 +1214,21 @@ async function apiChatStream(query, threadId, onStep, onDone, onError, onThink) 
       if (!part.startsWith('data: ')) continue;
       try {
         const data = JSON.parse(part.slice(6));
-        if (data.type === 'step') onStep(data);
-        else if (data.type === 'think') { if (onThink) onThink(data); }
-        else if (data.type === 'error') onError(data);
-        else onDone(data);  // 'done'/'info'/'rag'/'report'/'ingest'/'search' 都是最终结果
+        if (data.type === 'step') h.onStep && h.onStep(data);
+        else if (data.type === 'think') h.onThink && h.onThink(data);
+        else if (data.type === 'token') h.onToken && h.onToken(data);
+        else if (data.type === 'interrupt') h.onInterrupt && h.onInterrupt(data);
+        else if (data.type === 'error') h.onError && h.onError(data);
+        else h.onDone && h.onDone(data);  // 'done'/'info'/'rag'/... 最终结果
       } catch(e) {}
     }
   }
+}
+function apiChatStream(query, threadId, h) {
+  return streamSSE(`${API_BASE}/api/chat/stream`, { query, thread_id: threadId, user_id: USER_ID }, h);
+}
+function apiChatResume(threadId, selection, h) {
+  return streamSSE(`${API_BASE}/api/chat/resume`, { thread_id: threadId, selection, user_id: USER_ID }, h);
 }
 async function apiUploadPDF(file, title='') {
   const fd = new FormData();
@@ -1239,29 +1270,71 @@ async function handleChatQuery(query, threadId) {
   renderSidebar(); showLoading(); scrollToBottom();
 
   let result = null;
-  await apiChatStream(
-    query, threadId,
-    (step) => { updateLoadingStep(step.message); },
-    (done) => {
-      console.log('[SSE done]', done);
-      collapseThink();
-      result = done;
-    },
-    (err)  => {
-      console.warn('[SSE error]', err);
-      result = { type: 'error', answer: err.answer || '请求失败' };
-    },
-    (think) => { addThinkLine(think.message); }
-  );
+  let streamedText = '';
+  let waitingConfirm = false;
 
-  removeLoading();
-  // answer 可能是空字符串，做更严格的判断
-  const answer = (result && result.answer && result.answer.trim()) ? result.answer : null;
-  // type 字段现在是 SSE 协议标识（'done'/'step'/'think'/'error'），用 msg_type 渲染消息样式
-  const msgType = result?.msg_type || result?.type || 'info';
-  const msgContent = answer || '（后端处理完成，但未返回文字回复。请查看控制台 [SSE done] 日志排查。）';
-  addMessage(threadId, { role:'assistant', type:msgType, content:msgContent, timestamp:new Date().toISOString() });
-  renderMessages();
+  function finalize() {
+    removeLoading();
+    const answer = (result && result.answer && result.answer.trim()) ? result.answer : null;
+    const msgType = result?.msg_type || result?.type || 'info';
+    const msgContent = answer || '（后端处理完成，但未返回文字回复。请查看控制台 [SSE done] 日志排查。）';
+    addMessage(threadId, { role:'assistant', type:msgType, content:msgContent, timestamp:new Date().toISOString() });
+    renderMessages();
+  }
+
+  const handlers = {
+    onStep:  (step)  => { updateLoadingStep(step.message); },
+    onThink: (think) => { addThinkLine(think.message); },
+    onToken: (tok)   => { streamedText += (tok.text || ''); streamTokenIntoLoading(streamedText); },
+    onDone:  (done)  => { console.log('[SSE done]', done); collapseThink(); result = done; },
+    onError: (err)   => { console.warn('[SSE error]', err); result = { type:'error', answer: err.answer || '请求失败' }; },
+    onInterrupt: (data) => {
+      // HITL：渲染入库确认卡片，等用户勾选后调用 /resume 继续
+      waitingConfirm = true;
+      renderIngestConfirm(data, async (selection) => {
+        waitingConfirm = false;
+        streamedText = '';
+        removeLoading(); showLoading();   // 为入库阶段重开一个加载气泡
+        await apiChatResume(threadId, selection, handlers);
+        if (!waitingConfirm) { finalize(); refreshPaperCount(); }
+      });
+    },
+  };
+
+  await apiChatStream(query, threadId, handlers);
+  if (waitingConfirm) return;   // 等待用户确认，finalize 交给 resume 回调
+  finalize();
+}
+
+// HITL 入库确认卡片：勾选要入库的论文后回调 onConfirm(选中序号数组 或 'none')
+function renderIngestConfirm(data, onConfirm) {
+  const el = document.getElementById('loadingMsg');
+  if (!el) return;
+  const bubble = el.querySelector('.msg-bubble-ai');
+  if (!bubble) return;
+  const papers = data.papers || [];
+  const rows = papers.map(p => `
+    <label style="display:flex;align-items:center;gap:8px;padding:5px 0;cursor:pointer;border-bottom:1px solid rgba(0,0,0,.05)">
+      <input type="checkbox" class="confirm-cb" value="${p.idx}" checked>
+      <span style="flex:1;font-size:13px">${escHtml(p.title || '未知')}</span>
+      <span style="opacity:.55;font-size:11px;white-space:nowrap">${escHtml((p.published || '') + (p.arxiv_id ? (' · ' + p.arxiv_id) : ''))}</span>
+    </label>`).join('');
+  bubble.innerHTML = `
+    <div style="border:1px solid rgba(184,98,26,.35);border-radius:10px;padding:12px;background:rgba(184,98,26,.05)">
+      <div style="font-weight:600;margin-bottom:8px;font-size:13px">🙋 ${escHtml(data.prompt || '请确认要入库的论文：')}</div>
+      <div>${rows}</div>
+      <div style="margin-top:10px;display:flex;gap:8px">
+        <button id="confirmIngestBtn" style="background:#b8621a;color:#fff;border:none;border-radius:7px;padding:7px 14px;font-size:13px;cursor:pointer">确认入库</button>
+        <button id="skipIngestBtn" style="background:transparent;color:#b8621a;border:1px solid rgba(184,98,26,.4);border-radius:7px;padding:7px 14px;font-size:13px;cursor:pointer">全部跳过</button>
+      </div>
+    </div>`;
+  const status = document.getElementById('thinkStatus');
+  if (status) status.textContent = '等待确认入库...';
+  const collect = () => Array.from(bubble.querySelectorAll('.confirm-cb:checked')).map(c => parseInt(c.value, 10));
+  const lock = () => { const b1=document.getElementById('confirmIngestBtn'), b2=document.getElementById('skipIngestBtn'); if(b1)b1.disabled=true; if(b2)b2.disabled=true; };
+  document.getElementById('confirmIngestBtn').addEventListener('click', () => { lock(); onConfirm(collect()); });
+  document.getElementById('skipIngestBtn').addEventListener('click', () => { lock(); onConfirm('none'); });
+  scrollToBottom();
 }
 
 async function handlePDFUpload(threadId) {
