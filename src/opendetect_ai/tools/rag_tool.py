@@ -10,6 +10,7 @@ import os
 import re
 import tempfile
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import fitz  # PyMuPDF
@@ -95,10 +96,34 @@ def _get_vectorstore() -> Chroma:
 
 # ── 文本分块器 ─────────────────────────────────────────────────
 _splitter = RecursiveCharacterTextSplitter(
-    chunk_size=500,
-    chunk_overlap=50,
-    separators=["\n\n", "\n", ".", " "],
+    chunk_size=800,
+    chunk_overlap=100,
+    separators=["\n\n", "\n", ". ", " "],
 )
+
+# 并行 embedding 的并发数：入库瓶颈是 embedding 的串行网络往返，
+# 用线程池并发多个 batch 请求，把入库时间压下来。
+_EMBED_WORKERS = 8
+
+
+def _add_documents_fast(vectorstore: Chroma, documents: list[Document], ids: list[str]) -> None:
+    """
+    并行计算 embedding 后一次性写入向量库，替代 add_documents 的串行往返。
+    langchain 的 add_documents 会按 chunk_size 逐批**串行**请求 embedding，
+    一篇上百块的论文要几十次依次往返；这里把 batch（DashScope 上限 10 条）
+    分组后用线程池并发请求，再用预计算向量批量 upsert，入库快数倍。
+    """
+    if not documents:
+        return
+    embeddings = _get_embeddings()
+    texts = [d.page_content for d in documents]
+    metas = [d.metadata for d in documents]
+    groups = [texts[i:i + 10] for i in range(0, len(texts), 10)]  # DashScope 单批上限 10
+    with ThreadPoolExecutor(max_workers=min(_EMBED_WORKERS, len(groups))) as ex:
+        group_vecs = list(ex.map(embeddings.embed_documents, groups))  # 保序
+    vectors = [v for gv in group_vecs for v in gv]
+    # 用预计算向量批量写入（走底层 chroma collection，跳过其内部的串行 embedding）
+    vectorstore._collection.upsert(ids=ids, embeddings=vectors, documents=texts, metadatas=metas)
 
 
 # ── 工具函数 ───────────────────────────────────────────────────
@@ -215,7 +240,7 @@ def ingest_paper(
 
         # ── Step 5: 用确定性 ID 写入，天然幂等 ────────────────
         # 即使因某种原因重复入库，相同 ID 只会覆盖写入，不产生垃圾数据
-        vectorstore.add_documents(documents, ids=ids)
+        _add_documents_fast(vectorstore, documents, ids)
         bump_corpus_version()   # 使 BM25 稀疏索引缓存失效
         return {"status": "ok", "chunks": len(documents)}
 
@@ -323,7 +348,7 @@ def ingest_local_pdf(
             ))
             ids.append(_make_chunk_id(title, "", i))
 
-        vectorstore.add_documents(documents, ids=ids)
+        _add_documents_fast(vectorstore, documents, ids)
         bump_corpus_version()   # 使 BM25 稀疏索引缓存失效
         return {"status": "ok", "chunks": len(documents)}
 
