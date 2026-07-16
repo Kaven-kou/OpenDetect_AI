@@ -9,6 +9,7 @@ import hashlib
 import os
 import re
 import tempfile
+import threading
 from pathlib import Path
 
 import fitz  # PyMuPDF
@@ -28,23 +29,68 @@ from opendetect_ai.env_utils import (
 
 
 # ── 初始化 Embeddings 和向量库 ─────────────────────────────────
+_vectorstore: Chroma | None = None
+_vectorstore_lock = threading.Lock()
+
+# 语料版本号：每次写入 +1。BM25 稀疏检索器据此判断缓存是否失效、需要重建。
+_corpus_version = 0
+_corpus_version_lock = threading.Lock()
+
+
+def bump_corpus_version() -> None:
+    """向量库发生写入后调用，使下游 BM25 缓存失效。"""
+    global _corpus_version
+    with _corpus_version_lock:
+        _corpus_version += 1
+
+
+def get_corpus_version() -> int:
+    with _corpus_version_lock:
+        return _corpus_version
+
+
+def get_all_documents() -> list[Document]:
+    """取出向量库中全部文档（供 BM25 稀疏检索构建索引）。空库返回 []。"""
+    vectorstore = _get_vectorstore()
+    result = vectorstore.get(include=["documents", "metadatas"])
+    if not result or not result.get("ids"):
+        return []
+    docs = []
+    for text, meta in zip(result.get("documents", []), result.get("metadatas", [])):
+        docs.append(Document(page_content=text or "", metadata=meta or {}))
+    return docs
+
+
+def vectorstore_is_empty() -> bool:
+    """用公开接口判断向量库是否为空。"""
+    result = _get_vectorstore().get(limit=1)
+    return not (result and result.get("ids"))
+
+
 def _get_embeddings() -> OpenAIEmbeddings:
     return OpenAIEmbeddings(
         model=OPENDETECT_EMBED_MODEL,
         base_url=OPENDETECT_EMBED_BASE_URL,
         api_key=OPENDETECT_EMBED_API_KEY,
         check_embedding_ctx_length=False,
-        chunk_size=5,
+        chunk_size=10,   # DashScope 单次最多 10 条（实测 25 即报 batch size invalid）；
+                         # 从 5 提到 10 把入库时的 embedding 往返请求砍半
     )
 
 
 def _get_vectorstore() -> Chroma:
-    os.makedirs(CHROMA_PERSIST_DIR, exist_ok=True)
-    return Chroma(
-        collection_name="opendetect_papers",
-        embedding_function=_get_embeddings(),
-        persist_directory=CHROMA_PERSIST_DIR,
-    )
+    global _vectorstore
+
+    if _vectorstore is None:
+        with _vectorstore_lock:
+            if _vectorstore is None:
+                os.makedirs(CHROMA_PERSIST_DIR, exist_ok=True)
+                _vectorstore = Chroma(
+                    collection_name="opendetect_papers",
+                    embedding_function=_get_embeddings(),
+                    persist_directory=CHROMA_PERSIST_DIR,
+                )
+    return _vectorstore
 
 
 # ── 文本分块器 ─────────────────────────────────────────────────
@@ -170,6 +216,7 @@ def ingest_paper(
         # ── Step 5: 用确定性 ID 写入，天然幂等 ────────────────
         # 即使因某种原因重复入库，相同 ID 只会覆盖写入，不产生垃圾数据
         vectorstore.add_documents(documents, ids=ids)
+        bump_corpus_version()   # 使 BM25 稀疏索引缓存失效
         return {"status": "ok", "chunks": len(documents)}
 
     finally:
@@ -182,28 +229,16 @@ def retrieve_context(query: str, k: int = 5) -> list[dict]:
     """
     从向量库中检索与问题最相关的论文片段。
 
+    走完整检索管线：Self-Query → Hybrid(向量 + BM25) + RRF 融合 → 元数据过滤
+    → Rerank 去噪 → top-k。相比朴素向量检索，能显著抑制脏库里的跨领域噪音。
+
     Args:
         query: 用户问题或检索关键词
         k:     返回最相关的段落数，默认 5
     """
-    vectorstore = _get_vectorstore()
-
-    # 用公开接口检查是否为空
-    result = vectorstore.get(limit=1)
-    if not result or not result.get("ids"):
-        return [{"error": "向量库为空，请先使用 ingest_paper 工具入库论文"}]
-
-    docs = vectorstore.similarity_search(query, k=k)
-    return [
-        {
-            "content":   doc.page_content,
-            "title":     doc.metadata.get("title", ""),
-            "arxiv_id":  doc.metadata.get("arxiv_id", ""),
-            "published": doc.metadata.get("published", ""),
-            "chunk_idx": doc.metadata.get("chunk_idx", 0),
-        }
-        for doc in docs
-    ]
+    # 延迟导入：retriever 在模块级导入 rag_tool，这里延迟引用以避免循环导入
+    from opendetect_ai.tools.retriever import retrieve
+    return retrieve(query, k=k)
 
 
 @tool
@@ -289,6 +324,7 @@ def ingest_local_pdf(
             ids.append(_make_chunk_id(title, "", i))
 
         vectorstore.add_documents(documents, ids=ids)
+        bump_corpus_version()   # 使 BM25 稀疏索引缓存失效
         return {"status": "ok", "chunks": len(documents)}
 
     except Exception as e:

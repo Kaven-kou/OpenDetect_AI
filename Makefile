@@ -1,4 +1,4 @@
-.PHONY: help install dev run test integration-tests lint format
+.PHONY: help install dev run test integration-tests lint format eval
 
 help:
 	@echo 'Targets:'
@@ -7,6 +7,7 @@ help:
 	@echo '  run                 Start the local LangGraph dev server'
 	@echo '  test                Run unit tests'
 	@echo '  integration-tests   Run integration tests'
+	@echo '  eval                Run RAG retrieval eval (baseline vs pipeline)'
 	@echo '  lint                Run Ruff checks'
 	@echo '  format              Format with Ruff'
 
@@ -24,6 +25,9 @@ test:
 
 integration-tests:
 	uv run python -m pytest tests/integration_tests -q
+
+eval:
+	uv run python -m opendetect_ai.eval.rag_eval
 
 lint:
 	uv run python -m ruff check src tests
