@@ -49,6 +49,13 @@ class RouteDecision(BaseModel):
         default="",
         description="仅当用户是闲聊/问身份/问能力时，在此生成中文友好回复（Markdown）；任务类请求留空字符串",
     )
+    rewritten_query: str = Field(
+        default="",
+        description=(
+            "把用户省略/指代/确认式的话（如承接上一轮搜索提议时的\"好啊\"）改写成完整、"
+            "自包含的检索问题；无需改写时留空字符串"
+        ),
+    )
 
 
 def _route_with_llm(prompt: str) -> RouteDecision:
@@ -83,6 +90,7 @@ def _route_with_llm(prompt: str) -> RouteDecision:
             next=nxt if nxt in VALID_NEXT else "FINISH",
             reason=data.get("reason", ""),
             reply=data.get("reply", "") or "",
+            rewritten_query=data.get("rewritten_query", "") or "",
         )
     except Exception as exc:
         return RouteDecision(next="FINISH", reason=f"路由解析失败: {exc}", reply="")
@@ -153,24 +161,34 @@ def supervisor_node(state: AgentState) -> dict:
     next_agent    = decision.next
     reason        = decision.reason
     direct_answer = decision.reply
+    rewritten     = (decision.rewritten_query or "").strip()
 
     # Literal 已约束 next 合法；保留一次防御性兜底
     if next_agent not in VALID_NEXT:
         _illegal = next_agent
         next_agent = "FINISH"
         reason     = f"非法路由目标 '{_illegal}'，已降级为 FINISH"
- 
+
     print(f"[Supervisor] → {next_agent}  理由: {reason}")
     push_progress(_tid, f"🧭 路由决策：→ {next_agent}  {reason}")
     if direct_answer:
         print(f"[Supervisor] 闲聊回复: {direct_answer[:60]}...")
         push_progress(_tid, "💬 生成闲聊回复...")
- 
+
     # 闲聊回复直接放入 messages，确保前端能从消息流里拿到
     msg_content = direct_answer if direct_answer else f"Supervisor 决策: {next_agent} — {reason}"
- 
-    return {
+
+    result = {
         "next":          next_agent,
         "direct_answer": direct_answer,
         "messages":      [AIMessage(content=msg_content)],
     }
+
+    # 承接上一轮的省略/确认式输入（如"好啊"确认搜索）：用改写后的完整问题替换本轮 user_query，
+    # 让下游 search / rag / report 拿到自包含的检索问题，而不是无主题的"好啊"。
+    if rewritten and next_agent in {"search", "rag", "report"}:
+        result["user_query"] = rewritten
+        print(f"[Supervisor] 改写 user_query → '{rewritten}'（承接上一轮意图）")
+        push_progress(_tid, f"✍️ 补全意图：{rewritten[:40]}")
+
+    return result

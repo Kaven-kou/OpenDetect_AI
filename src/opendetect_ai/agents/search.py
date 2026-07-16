@@ -91,6 +91,9 @@ def _identify_search_intent(user_query: str, llm: ChatOpenAI, chat_context: str 
         "\u2192 从对话上下文中提取核心话题，输出该话题的关键词搜索\n"
         '\u2192 错误示例: {"type": "keyword", "value": "deep learning"}（太宽泛）\n'
         '\u2192 正确示例: {"type": "keyword", "value": "instance segmentation methods"}（基于上下文）\n\n'
+        "**情况F**：用户本轮只是纯确认或同意（如 好、好啊、可以、行、嗯），本身不含任何主题\n"
+        "→ 必须从对话上下文里「上一轮用户的提问」里提取真正要搜的主题，绝不能把 好啊 当成关键词\n"
+        "→ 正确示例（上一轮问过 LoRA）：输出 type=keyword，value=LoRA low-rank adaptation fine-tuning\n\n"
         "## 常用著名论文 arxiv ID 参考\n"
         "ViT 2010.11929 | BERT 1810.04805 | GPT-3 2005.14165\n"
         "ResNet 1512.03385 | Transformer 1706.03762 | CLIP 2103.00020\n"

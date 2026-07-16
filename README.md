@@ -391,6 +391,8 @@ LANGGRAPH_STRICT_MSGPACK=false
 - 任何知识 / 技术 / 概念问题（"XX 是什么"、"XX 与 YY 的区别"）→ **一律走 RAG**，由文献支撑作答；库里没有相关论文时，RAG 会**如实说明并主动提议去搜索入库**，而不是用模型自身知识编造（严格"答案有出处"）；
 - 只有库还空着时，才由 Supervisor 直接提示"暂无相关论文，要我去搜一批吗？"。
 
+**多轮意图承接（query rewriting）**：`RouteDecision` 带一个 `rewritten_query` 字段。当上一轮助手提议过"要我去搜索入库吗？"、用户本轮只回"**好啊 / 可以 / 行**"这类**不含主题**的确认时，Supervisor 会路由到 `search` 并把 `rewritten_query` 补成完整问题（从上一轮取主题，如"讲讲 LoRA 低秩适配"），用它替换本轮无主题的 `user_query`。于是下游 `search → ingest → rag` 全程拿到自包含的问题，"好啊"也能正确触发搜索、并最终回答原问题——省略式追问在有状态的多智能体图里由路由节点顺手补全，一处改写让整条链路受益。
+
 内置防死循环机制：`search_attempted` 确保搜索失败时不再重试；`rag_answer` / `final_report` 生成后直接收束到 FINISH；入库失败超过 2 次的论文永久放弃。
 
 ### Search Agent
