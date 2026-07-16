@@ -88,7 +88,9 @@ def rag_node(state: AgentState) -> dict:
     )
 
     llm = _get_llm()
-    response = llm.invoke([HumanMessage(content=prompt)])
+    # 打上 final_answer 标签：SSE 层据此只流式「最终答案」的 token，
+    # 而不会把检索管线里 self-query / rerank 的 LLM token 也推给前端。
+    response = llm.invoke([HumanMessage(content=prompt)], config={"tags": ["final_answer"]})
     answer = response.content.strip()
 
     print(f"[RAG] 生成回答（前100字）: {answer[:100]}...")

@@ -8,7 +8,7 @@ from __future__ import annotations
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, AIMessage
 
-from opendetect_ai.state import AgentState, PaperMeta
+from opendetect_ai.state import AgentState
 from opendetect_ai.context_utils import build_context_str
 from opendetect_ai.tools.progress import push_progress
 from opendetect_ai.prompts import REPORT_PROMPT
@@ -98,7 +98,8 @@ def report_node(state: AgentState) -> dict:
 
     # ── Step 4: 生成综述 ───────────────────────────────────────
     llm = _get_llm()
-    response = llm.invoke([HumanMessage(content=prompt)])
+    # final_answer 标签：供 SSE 层筛选出「最终综述」的 token 做流式输出
+    response = llm.invoke([HumanMessage(content=prompt)], config={"tags": ["final_answer"]})
     report = response.content.strip()
 
     push_progress(_tid, f"✅ 综述生成完成，共 {len(report)} 字")

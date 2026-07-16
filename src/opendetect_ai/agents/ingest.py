@@ -6,12 +6,42 @@ Ingest Agent —— OpenDetect_AI
 from __future__ import annotations
 
 from langchain_core.messages import AIMessage
+from langgraph.types import interrupt
 
 from opendetect_ai.state import AgentState, PaperMeta
-
-MAX_RETRY = 2  # 单篇论文最多重试次数，超过后永久放弃
 from opendetect_ai.tools.progress import push_progress
 from opendetect_ai.tools.rag_tool import ingest_local_pdf, ingest_paper
+from opendetect_ai.env_utils import OPENDETECT_HITL
+
+MAX_RETRY = 2  # 单篇论文最多重试次数，超过后永久放弃
+
+
+def _apply_confirmation(pending: list[PaperMeta], selection) -> list[PaperMeta]:
+    """
+    按用户的入库确认结果过滤待入库论文。
+    selection:
+      - None / "all"           → 全部保留
+      - "none"                 → 全部放弃
+      - list[int]（序号，0起） → 仅保留选中的；未选中的标记 ingested=True（视为已处理，不再重试）
+    """
+    if selection is None or selection == "all":
+        return pending
+    if selection == "none":
+        keep = set()
+    elif isinstance(selection, dict):
+        keep = {int(i) for i in selection.get("selected", [])}
+    elif isinstance(selection, (list, tuple)):
+        keep = {int(i) for i in selection}
+    else:
+        return pending  # 未知格式，安全起见全部保留
+
+    kept = []
+    for i, p in enumerate(pending):
+        if i in keep:
+            kept.append(p)
+        else:
+            p.ingested = True   # 用户未选，标记为已处理，避免重试
+    return kept
 
 
 def ingest_node(state: AgentState) -> dict:
@@ -19,10 +49,11 @@ def ingest_node(state: AgentState) -> dict:
     """
     Ingest Agent 节点：
     1. 从 state.papers_to_ingest 取出待处理论文
-    2. 逐篇下载 PDF 并存入向量库
-    3. 更新 ingested_count 和 search_results 的 ingested 标记
+    2. （HITL）入库前中断，让用户确认要入库哪几篇
+    3. 逐篇下载 PDF 并存入向量库
+    4. 更新 ingested_count 和 search_results 的 ingested 标记
     """
-    # ── 优先处理本地 PDF（手动上传）─────────────────────────
+    # ── 优先处理本地 PDF（手动上传，无需确认）─────────────────
     local_path = state.get("local_pdf_path", "")
     if local_path:
         print(f"[Ingest] 处理本地 PDF: {local_path}")
@@ -38,22 +69,50 @@ def ingest_node(state: AgentState) -> dict:
             "messages": [AIMessage(content=msg)],
             "error": "" if result.get("status") == "ok" else msg,
         }
-    
+
     papers: list[PaperMeta] = state.get("papers_to_ingest", [])
-
-    if not papers:
-        return {
-            "ingested_count": state.get("ingested_count", 0),
-            "messages": [AIMessage(content="没有待入库的论文。")],
-        }
-
-    # ── 过滤掉已入库的 ─────────────────────────────────────────
     pending = [p for p in papers if not p.ingested]
+
+    # 「重试」路由：待入库集里没有未处理的了，但上一轮有可重试的失败论文
+    # （有 arxiv_id、未超上限），它们此前被置 ingested=True，这里捞回来重置为待处理。
+    # 否则 failed_papers 形同虚设，重试永远不会真正发生（这是修复前的 bug）。
+    if not pending:
+        retriable = [
+            p for p in state.get("failed_papers", [])
+            if getattr(p, "retry_count", 0) <= MAX_RETRY
+        ]
+        for p in retriable:
+            p.ingested = False
+        if retriable:
+            pending = retriable
+            papers = retriable
+
     if not pending:
         return {
             "ingested_count": state.get("ingested_count", 0),
-            "messages": [AIMessage(content="所有论文均已入库，无需重复处理。")],
+            "messages": [AIMessage(content="没有待入库或可重试的论文。")],
         }
+
+    # ── HITL：入库前人工确认（仅在 Web/持久化会话中开启 hitl 时触发）──
+    # interrupt() 首次执行会暂停并把 payload 抛给前端；用户 resume 后返回其选择。
+    hitl_on = OPENDETECT_HITL and bool(state.get("hitl"))
+    if hitl_on:
+        selection = interrupt({
+            "action": "confirm_ingest",
+            "prompt": "搜索到以下论文，请勾选要入库的（默认全选）：",
+            "papers": [
+                {"idx": i, "title": p.title, "arxiv_id": p.arxiv_id,
+                 "published": p.published, "authors": ", ".join(p.authors)}
+                for i, p in enumerate(pending)
+            ],
+        })
+        pending = _apply_confirmation(pending, selection)
+        if not pending:
+            return {
+                "papers_to_ingest": papers,
+                "ingested_count": state.get("ingested_count", 0),
+                "messages": [AIMessage(content="已取消入库：本次未选择任何论文。")],
+            }
 
     push_progress(_tid, f"📥 开始入库，共 {len(pending)} 篇...")
     print(f"[Ingest] 待入库论文数: {len(pending)}")

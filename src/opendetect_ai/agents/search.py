@@ -262,7 +262,7 @@ def search_node(state: AgentState) -> dict:
 
         if not papers:
             # OpenAlex 找不到时用 ArXiv MCP 补充（对新论文或冷门论文更准）
-            push_progress(_tid, f"⚡ OpenAlex 未找到，尝试 ArXiv MCP...")
+            push_progress(_tid, "⚡ OpenAlex 未找到，尝试 ArXiv MCP...")
             print(f"[Search] OpenAlex 未找到，回退 ArXiv MCP: {search_value}")
             raw_results = call_mcp_tool("search_papers", {
                 "query": search_value, "max_results": 1,
