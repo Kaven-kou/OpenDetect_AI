@@ -4,7 +4,7 @@
 """
 from __future__ import annotations
 
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage
 
 # 滑动窗口大小：保留最近几轮「用户问 + 助手答」
 CONTEXT_WINDOW = 4

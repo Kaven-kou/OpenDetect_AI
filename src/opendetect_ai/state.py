@@ -60,6 +60,8 @@ class AgentState(dict):
     failed_papers:    list[PaperMeta]
     direct_answer:    str            # Supervisor 针对闲聊/身份询问生成的直接回复
     thread_id:        str            # 当前会话 ID，用于进度推送队列隔离
+    hitl:             bool           # 是否开启入库前人工确认（仅 Web 持久化会话置 True）
+    user_id:          str            # 用户标识，长期记忆按此隔离（跨会话）
 
 
 # ── 初始状态工厂函数 ───────────────────────────────────────────
@@ -84,4 +86,6 @@ def create_initial_state(user_query: str) -> AgentState:
         failed_papers=[],
         direct_answer="",
         thread_id="default",
+        hitl=False,
+        user_id="default",
     )
