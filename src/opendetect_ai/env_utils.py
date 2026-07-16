@@ -27,6 +27,26 @@ OPENDETECT_EMBED_API_KEY  = os.getenv("OPENDETECT_EMBED_API_KEY", ALI_API_KEY)
  
 # ── 向量数据库 ─────────────────────────────────────────
 CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", "./data/chroma_db")
+
+# ── 检索管线（Hybrid + Self-Query + Rerank）────────────
+# 粗召回候选池大小（dense + BM25 融合后、rerank 之前）
+OPENDETECT_RETRIEVAL_POOL = int(os.getenv("OPENDETECT_RETRIEVAL_POOL", "30"))
+# 是否启用自查询（LLM 抽取年份/作者/标题过滤条件），"false" 关闭
+OPENDETECT_SELF_QUERY = os.getenv("OPENDETECT_SELF_QUERY", "true").lower() == "true"
+# 重排后端：llm（默认，复用 DeepSeek，零额外依赖）| dashscope（gte-rerank）| none
+OPENDETECT_RERANK_BACKEND = os.getenv("OPENDETECT_RERANK_BACKEND", "llm").lower()
+# dashscope 重排模型（仅 backend=dashscope 时使用，复用 EMBED 的 DashScope Key）
+OPENDETECT_RERANK_MODEL = os.getenv("OPENDETECT_RERANK_MODEL", "gte-rerank-v2")
+# 噪音闸门：rerank 相关性分低于该阈值的段落直接丢弃（跨领域脏数据）
+OPENDETECT_RERANK_MIN_SCORE = float(os.getenv("OPENDETECT_RERANK_MIN_SCORE", "0.3"))
+
+# ── Human-in-the-Loop ─────────────────────────────────
+# 入库前是否插入人工确认关卡（仅 Web/持久化会话生效），"false" 关闭
+OPENDETECT_HITL = os.getenv("OPENDETECT_HITL", "true").lower() == "true"
+
+# ── Verifier（RAG 回答事实性校验）─────────────────────
+# RAG 生成后是否校验回答有无检索来源支撑、不足时降级提示，"false" 关闭
+OPENDETECT_VERIFY = os.getenv("OPENDETECT_VERIFY", "true").lower() == "true"
  
 # ── MCP Server ─────────────────────────────────────────
 OPENDETECT_ARXIV_MCP_URL = os.getenv(
@@ -35,7 +55,7 @@ OPENDETECT_ARXIV_MCP_URL = os.getenv(
 )
  
 # ── LangSmith 追踪 ─────────────────────────────────────
-LANGCHAIN_TRACING_V2 = os.getenv("LANGCHAIN_TRACING_V2", "true")
+LANGCHAIN_TRACING_V2 = os.getenv("LANGCHAIN_TRACING_V2", "false")
 LANGCHAIN_PROJECT    = os.getenv("LANGCHAIN_PROJECT", "OpenDetect_AI")
 LANGCHAIN_API_KEY    = os.getenv("LANGCHAIN_API_KEY", LANGSMITH_API_KEY)
  
