@@ -3,16 +3,23 @@
 在同一个 chat_history.db 里维护一张 user_profile 表，
 记录用户跨会话的研究偏好、常用领域、感兴趣的论文方向。
 
-表结构：
+表结构（按 user_id 隔离，多用户互不串画像）：
     user_profile (
-        key   TEXT PRIMARY KEY,   -- 偏好类型，如 'research_interests'
-        value TEXT,               -- JSON 序列化的内容
-        updated_at TEXT           -- ISO 时间戳
+        user_id    TEXT,             -- 用户标识，前端 localStorage 生成并随请求传入
+        key        TEXT,             -- 偏好类型，如 'research_interests'
+        value      TEXT,             -- JSON 序列化的内容
+        updated_at TEXT,             -- ISO 时间戳
+        PRIMARY KEY (user_id, key)
     )
+
+三种"记忆"要分清（面试易被追问）：
+    - Checkpointer(SqliteSaver)：工作流/会话状态，按 thread_id
+    - user_profile（本模块）    ：跨会话用户偏好，按 user_id
+    - Chroma                    ：论文知识库，全局共享
 
 设计原则：
 - 每次对话结束后异步提取偏好，不阻塞主流程
-- 新会话开始时读取偏好，注入到 Supervisor prompt
+- 新会话开始时按 user_id 读取偏好，注入到 Supervisor prompt
 - 提取失败静默处理，不影响正常对话
 """
 from __future__ import annotations
@@ -20,7 +27,6 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime
-from pathlib import Path
 
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage
@@ -33,36 +39,56 @@ def _get_db_path() -> str:
     return os.path.join(os.path.dirname(CHROMA_PERSIST_DIR), "chat_history.db")
 
 
-def _ensure_table(conn: sqlite3.Connection) -> None:
+def _create_table(conn: sqlite3.Connection) -> None:
     conn.execute("""
         CREATE TABLE IF NOT EXISTS user_profile (
-            key        TEXT PRIMARY KEY,
+            user_id    TEXT NOT NULL DEFAULT 'default',
+            key        TEXT NOT NULL,
             value      TEXT NOT NULL,
-            updated_at TEXT NOT NULL
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (user_id, key)
         )
     """)
+
+
+def _ensure_table(conn: sqlite3.Connection) -> None:
+    """建表；若检测到旧结构（只有 key 作主键、无 user_id 列）则平滑迁移到 'default'。"""
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(user_profile)").fetchall()]
+    if cols and "user_id" not in cols:
+        # 旧表迁移：历史画像全部归到 user_id='default'
+        conn.execute("ALTER TABLE user_profile RENAME TO _user_profile_old")
+        _create_table(conn)
+        conn.execute(
+            "INSERT OR IGNORE INTO user_profile (user_id, key, value, updated_at) "
+            "SELECT 'default', key, value, updated_at FROM _user_profile_old"
+        )
+        conn.execute("DROP TABLE _user_profile_old")
+    else:
+        _create_table(conn)
     conn.commit()
 
 
 # ── 读写接口 ────────────────────────────────────────────────────
-def load_user_profile() -> dict:
+def load_user_profile(user_id: str = "default") -> dict:
     """
-    读取用户画像，返回结构化字典。
+    按 user_id 读取用户画像，返回结构化字典。
     失败时返回空字典，不抛异常。
     """
     try:
         conn = sqlite3.connect(_get_db_path(), check_same_thread=False)
         _ensure_table(conn)
-        rows = conn.execute("SELECT key, value FROM user_profile").fetchall()
+        rows = conn.execute(
+            "SELECT key, value FROM user_profile WHERE user_id = ?", (user_id,)
+        ).fetchall()
         conn.close()
         return {row[0]: json.loads(row[1]) for row in rows}
     except Exception:
         return {}
 
 
-def save_user_profile(updates: dict) -> None:
+def save_user_profile(user_id: str, updates: dict) -> None:
     """
-    保存/更新用户画像字段。
+    保存/更新指定 user_id 的画像字段。
     updates 的每个 key-value 会独立 upsert，其他字段不受影响。
     """
     try:
@@ -71,14 +97,15 @@ def save_user_profile(updates: dict) -> None:
         now = datetime.utcnow().isoformat()
         for key, value in updates.items():
             conn.execute(
-                "INSERT INTO user_profile (key, value, updated_at) VALUES (?, ?, ?)"
-                " ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
-                (key, json.dumps(value, ensure_ascii=False), now)
+                "INSERT INTO user_profile (user_id, key, value, updated_at) VALUES (?, ?, ?, ?)"
+                " ON CONFLICT(user_id, key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                (user_id, key, json.dumps(value, ensure_ascii=False), now)
             )
         conn.commit()
         conn.close()
     except Exception as e:
         print(f"[UserMemory] 保存失败（静默）: {e}")
+
 
 
 # ── 格式化为 prompt 可用的字符串 ──────────────────────────────
@@ -140,14 +167,16 @@ def extract_and_save_profile(
     llm_model: str,
     llm_base_url: str,
     llm_api_key: str,
+    user_id: str = "default",
 ) -> None:
     """
-    从对话历史中提取用户偏好并持久化。
+    从对话历史中提取用户偏好并持久化到指定 user_id 的画像。
     在对话结束后调用，失败时静默处理。
 
     Args:
         messages: AgentState.messages 列表
         llm_model/base_url/api_key: LLM 配置
+        user_id: 用户标识，画像按此隔离
     """
     if not messages:
         return
@@ -186,7 +215,7 @@ def extract_and_save_profile(
         extracted = json.loads(raw)
 
         # 合并而非覆盖：保留历史偏好，用新数据补充
-        existing = load_user_profile()
+        existing = load_user_profile(user_id)
         merged = {}
         for key in ("research_interests", "frequent_queries", "preferred_venues"):
             old_vals = existing.get(key, [])
@@ -197,7 +226,7 @@ def extract_and_save_profile(
         # last_session_topics 每次直接覆盖
         merged["last_session_topics"] = extracted.get("last_session_topics", [])
 
-        save_user_profile(merged)
+        save_user_profile(user_id, merged)
         print(f"[UserMemory] 已更新用户偏好: {list(merged.keys())}")
 
     except Exception as e:
