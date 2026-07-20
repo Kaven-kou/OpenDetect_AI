@@ -1,12 +1,20 @@
 """
 Search Agent —— OpenDetect_AI
 负责根据用户需求搜索学术论文，结果写入 state.search_results。
+
+语义理解分三段（rule / LLM 各归其位）：
+  ① 确定性解析：用户明确给的 arXiv ID / 链接用正则识别，不进 LLM、零幻觉；
+  ② LLM 结构化判断：只判断「精确标题 vs 话题关键词」这件需要判断的事，输出 SearchIntent；
+  ③ 真正使用解析结果：泛搜用 intent.query（已含上下文/指代消解），而非拿原始输入再抽一遍。
+ID 的事实来源是搜索后端（OpenAlex/arXiv），不是模型的参数记忆——所以不让模型回忆 arxiv ID。
 """
 
 from __future__ import annotations
 
-import json                                          # ← 新增
 import re
+from typing import Literal
+
+from pydantic import BaseModel, Field
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, AIMessage
 
@@ -26,95 +34,104 @@ def _get_llm() -> ChatOpenAI:
         model=OPENDETECT_LLM_MODEL,
         base_url=OPENDETECT_LLM_BASE_URL,
         api_key=OPENDETECT_LLM_API_KEY,
-        temperature=0,                  # ← 从 0.2 改成 0，意图识别需要确定性
+        temperature=0,                  # 意图识别需要确定性
     )
 
 
-def _extract_query(user_query: str, llm: ChatOpenAI) -> str:
-    """保留原有函数，作为 keyword 搜索的后备。"""
-    lowered = user_query.lower()
-    if "diffusion model" in lowered or "diffusion models" in lowered:
-        return "denoising diffusion probabilistic models image generation"
+# ── ① 确定性解析：只从用户明确给出的 ID / 链接里提取 arXiv ID ─────
+# 新式 ID：YYMM.number（月份 01-12），可带版本号 v2；
+# 旧式 ID：category/7位数字，如 hep-th/9901001、cs.LG/0501001；
+# URL：arxiv.org/abs|pdf/<id>。识别不到返回 ''，绝不从论文名称推断 ID。
+_ARXIV_NEW = re.compile(r"\b\d{2}(?:0[1-9]|1[0-2])\.\d{4,5}(?:v\d+)?\b")
+_ARXIV_OLD = re.compile(r"\b[a-z-]{2,}(?:\.[A-Za-z]{2})?/\d{7}(?:v\d+)?\b")
+_ARXIV_URL = re.compile(r"arxiv\.org/(?:abs|pdf)/([^\s?#]+)", re.IGNORECASE)
 
-    prompt = (
-        "请从以下用户问题中提取最适合 AI / 深度学习论文搜索引擎检索的英文短语。\n"
-        "要求：输出一个简洁的英文短句（不超过8个词），不要用逗号分隔关键词。\n"
-        "例如：'ViT vision transformer image recognition' 而不是 'ViT, vision, transformer'\n"
-        "如果术语存在跨学科歧义，请补充 AI 语境词，例如 diffusion model 应输出 'diffusion models deep learning image generation'。\n"
-        "只输出这个短句，不要有任何其他内容。\n\n"
-        f"用户问题：{user_query}"
+
+def _extract_provided_arxiv_id(text: str) -> str:
+    """
+    只识别「用户明确提供」的 arXiv ID / 链接，返回规范化后的 ID；识别不到返回 ''。
+    正则只做确定性识别，不承担「从标题猜 ID」——那交给搜索后端（API 才是 ID 的事实来源）。
+    """
+    if not text:
+        return ""
+
+    # 1) URL 形式（abs / pdf）优先
+    m = _ARXIV_URL.search(text)
+    if m:
+        cand = m.group(1).split("?")[0].split("#")[0].replace(".pdf", "")
+        return _normalize_arxiv_id(cand)
+
+    # 2) 显式 "arXiv:xxxx" 前缀
+    m = re.search(r"arxiv:\s*([^\s]+)", text, re.IGNORECASE)
+    if m:
+        cand = m.group(1).rstrip(".,;)")
+        if _ARXIV_NEW.fullmatch(cand) or _ARXIV_OLD.fullmatch(cand):
+            return _normalize_arxiv_id(cand)
+
+    # 3) 裸的新式 / 旧式 ID
+    m = _ARXIV_NEW.search(text)
+    if m:
+        return _normalize_arxiv_id(m.group(0))
+    m = _ARXIV_OLD.search(text)
+    if m:
+        return _normalize_arxiv_id(m.group(0))
+    return ""
+
+
+# ── ③ 结构化搜索意图：只判断「精确标题 vs 话题关键词」这一件需要判断的事 ──
+class SearchIntent(BaseModel):
+    """搜索意图。用 with_structured_output 约束，杜绝手撕 JSON。不含 arxiv_id（由正则前置分流）。"""
+    mode: Literal["exact_title", "topic"] = Field(
+        description="exact_title=用户点名了某一篇具体论文；topic=想找某方向的多篇论文或用指代/追问延续话题"
     )
-    response = llm.invoke([HumanMessage(content=prompt)])
-    return response.content.strip().strip('"').strip("'")
+    query: str = Field(
+        description="传给搜索后端的英文检索串：exact_title 填规范英文标题；topic 填英文关键词短语（≤8词，追问时须从上下文取当前话题）"
+    )
+    reason: str = Field(default="", description="一句话说明判断依据")
 
 
-# ── 新增函数 ───────────────────────────────────────────────────
-def _identify_search_intent(user_query: str, llm: ChatOpenAI, chat_context: str = "") -> dict:
+def _classify_search_intent(user_query: str, chat_context: str, llm: ChatOpenAI) -> SearchIntent:
     """
-    用 LLM 自身的知识分析用户真正想搜什么，返回搜索策略。
-
-    返回格式：
-        {"type": "arxiv_id", "value": "2010.11929", "reason": "ViT原版论文"}
-        {"type": "title",    "value": "Attention Is All You Need", "reason": "..."}
-        {"type": "keyword",  "value": "diffusion model generation", "reason": "..."}
+    判断用户想「精确找某篇论文」还是「找某方向的多篇」，并给出要传给搜索后端的英文检索串。
+    不再让模型回忆 arxiv ID（ID 由正则前置识别、由搜索后端校验）；失败时 fail-open 到 topic。
+    用字符串拼接注入上下文，避免 .format() 撞上 chat_context 里可能出现的花括号。
     """
-    # 用 % 格式化插入变量，彻底避免 f-string / .format() 解析 chat_context 里的花括号
-    # （chat_context 可能含 JSON 片段如 {"type":...}，会触发 KeyError）
+    ctx_section = ""
     if chat_context:
         ctx_section = (
-            "\n## 对话上下文（最近几轮对话，用于理解指代词和追问）\n"
+            "\n## 对话上下文（最近几轮，用于消解指代和追问）\n"
             + chat_context
-            + "\n\n**重要**：如果用户使用了\"它\"、\"这个\"、\"还有\"、\"其他的\"等指代词或追问，\n"
-            "必须从上下文中提取当前会话的核心话题作为搜索方向，\n"
-            "不要使用宽泛的 deep learning 等通用词。\n"
+            + "\n提示：用户用「它 / 这个 / 还有吗 / 更多」等指代或追问时，"
+            "必须从上下文提取当前话题作为 query，不要用 deep learning 这种泛词。\n"
         )
-    else:
-        ctx_section = ""
 
-    prompt_template = (
-        "你是一个深度学习领域的论文专家，请分析用户的搜索意图并输出搜索策略。\n"
-        "%s"
-        "\n## 判断规则\n\n"
-        "**情况A**：用户描述的是某篇特定著名论文（如\"ViT原版\"、\"首次提出XXX的论文\"）\n"
-        "\u2192 用你的知识识别出该论文的 arxiv ID\n"
-        '\u2192 输出: {"type": "arxiv_id", "value": "2010.11929", "reason": "ViT原版论文"}\n\n'
-        "**情况B**：用户说出了大致标题\n"
-        "\u2192 提取最准确的英文标题\n"
-        '\u2192 输出: {"type": "title", "value": "Attention Is All You Need", "reason": "用户提到了标题"}\n\n'
-        "**情况C**：用户想找某方向的多篇论文，或使用指代词追问更多论文\n"
-        "\u2192 若有对话上下文，必须基于上下文话题搜索，不能用宽泛词\n"
-        '\u2192 输出: {"type": "keyword", "value": "instance segmentation deep learning", "reason": "基于上下文"}\n\n'
-        "**情况D**：用户提供了 arxiv 链接（如 https://arxiv.org/abs/2010.11929）\n"
-        "\u2192 提取其中的 arxiv ID\n"
-        '\u2192 输出: {"type": "arxiv_id", "value": "2010.11929", "reason": "用户提供了arxiv链接"}\n\n'
-        "**情况E**：用户使用\"还有吗\"、\"其他的\"、\"更多\"等追问\n"
-        "\u2192 从对话上下文中提取核心话题，输出该话题的关键词搜索\n"
-        '\u2192 错误示例: {"type": "keyword", "value": "deep learning"}（太宽泛）\n'
-        '\u2192 正确示例: {"type": "keyword", "value": "instance segmentation methods"}（基于上下文）\n\n'
-        "**情况F**：用户本轮只是纯确认或同意（如 好、好啊、可以、行、嗯），本身不含任何主题\n"
-        "→ 必须从对话上下文里「上一轮用户的提问」里提取真正要搜的主题，绝不能把 好啊 当成关键词\n"
-        "→ 正确示例（上一轮问过 LoRA）：输出 type=keyword，value=LoRA low-rank adaptation fine-tuning\n\n"
-        "## 常用著名论文 arxiv ID 参考\n"
-        "ViT 2010.11929 | BERT 1810.04805 | GPT-3 2005.14165\n"
-        "ResNet 1512.03385 | Transformer 1706.03762 | CLIP 2103.00020\n"
-        "Swin Transformer 2103.14030 | DINO 2104.14294 | DINOv2 2304.07193\n"
-        "DETR 2005.12872 | SAM 2304.02643 | GroundingDINO 2303.05499\n"
-        "Stable Diffusion 2112.10752 | LLaMA 2302.13971 | LLaMA2 2307.09288\n\n"
-        "只输出 JSON，不要有任何其他内容。\n\n"
-        "用户需求：%s"
+    instructions = (
+        "你是深度学习论文检索助手。判断用户的搜索意图，输出结构化结果。\n\n"
+        "## 两种模式\n"
+        "- exact_title：用户点名了某一篇具体论文（给了较完整标题，或\"XX 原版/首次提出 XX 的那篇\"这类唯一指向）\n"
+        "  → query 填该论文最规范的英文标题，如 Attention Is All You Need\n"
+        "- topic：用户想找某方向的多篇论文，或用追问/指代延续上一个话题\n"
+        "  → query 填英文关键词短语（≤8 词）；跨学科歧义词补 AI 语境，"
+        "如 diffusion model → denoising diffusion probabilistic models image generation\n\n"
+        "## 约束\n"
+        "- 不要输出 arxiv ID（用户给的 ID/链接已由上游正则识别，不会走到这里）\n"
+        "- query 一律英文；只依据用户明确表达判断，别脑补\n"
     )
-    prompt = prompt_template % (ctx_section, user_query)
 
-    response = llm.invoke([HumanMessage(content=prompt)])
-    raw = response.content.strip()
+    prompt = instructions + ctx_section + "\n## 用户输入\n" + user_query
+
     try:
-        if "```" in raw:
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-        return json.loads(raw)
-    except Exception:
-        return {"type": "keyword", "value": user_query, "reason": "解析失败，使用原始输入"}
+        result = llm.with_structured_output(
+            SearchIntent, method="function_calling"
+        ).invoke([HumanMessage(content=prompt)])
+        if isinstance(result, SearchIntent):
+            return result
+        if isinstance(result, dict):
+            return SearchIntent(**result)
+    except Exception as exc:
+        print(f"[Search] 结构化意图解析失败，回退 topic: {exc}")
+    # fail-open：默认按话题搜，query 用原始输入（上游可能已把它改写成自包含 query）
+    return SearchIntent(mode="topic", query=user_query, reason="解析失败，回退原始输入")
 
 
 def _parse_results(raw_results: list[dict] | dict | str) -> list[PaperMeta]:
@@ -126,7 +143,7 @@ def _parse_results(raw_results: list[dict] | dict | str) -> list[PaperMeta]:
         raw_results = raw_results["papers"]
     elif isinstance(raw_results, dict) and isinstance(raw_results.get("results"), list):
         raw_results = raw_results["results"]
-    elif isinstance(raw_results, dict):   # ← 新增：兼容单篇返回
+    elif isinstance(raw_results, dict):   # 兼容单篇返回
         raw_results = [raw_results]
     elif not isinstance(raw_results, list):
         return []
@@ -225,71 +242,64 @@ def _has_tool_error(raw_results: list[dict] | dict | str) -> bool:
     return False
 
 
-def _call_openalex(search_type: str, search_value: str, user_query: str, llm: ChatOpenAI):
-    if search_type == "arxiv_id":
-        return call_mcp_tool("get_paper_by_id", {"arxiv_id": search_value}, server_name="openalex")
-    if search_type == "title":
-        return call_mcp_tool("get_paper_by_title", {"title": search_value}, server_name="openalex")
-
-    search_query = _extract_query(user_query, llm)
-    print(f"[Search] OpenAlex 关键词优化: {search_query}")
-    return call_mcp_tool("search_papers", {
-        "query":       search_query,
-        "max_results": 5,
-    }, server_name="openalex")
-
-
 def search_node(state: AgentState) -> dict:
     user_query = state.get("user_query", "")
+    _tid = state.get("thread_id", "default")
     llm = _get_llm()
 
-    # ── Step 1: 识别搜索意图（新增）─────────────────────────────
-    _tid = state.get("thread_id", "default")
-    chat_context = build_context_str(state.get("messages", []))
-    intent       = _identify_search_intent(user_query, llm, chat_context)
-    search_type  = intent.get("type", "keyword")
-    search_value = intent.get("value", user_query)
-    push_progress(_tid, f"🔍 意图识别：{search_type} → {search_value}")
-    print(f"[Search] 意图: {search_type} → '{search_value}'  ({intent.get('reason','')})")
-
-    # ── Step 2: 搜索策略 ──────────────────────────────────────────
-    # - arxiv_id / title（精确查询）：直接走 OpenAlex 精确接口，速度快且稳定
-    #   若 OpenAlex 找不到再用 ArXiv MCP 补充（ArXiv MCP 对精确 ID 更权威）
-    # - keyword（泛搜）：直接走 OpenAlex，避免 ArXiv MCP 限流带来的等待
-    if search_type in {"arxiv_id", "title"}:
-        # 精确查询：OpenAlex 优先
-        push_progress(_tid, f"📡 精确查询 OpenAlex：{search_value}")
-        print(f"[Search] OpenAlex 精确查询: {search_value}")
-        raw_results = _call_openalex(search_type, search_value, user_query, llm)
+    # ── Step 1: 确定性解析——用户明确给了 arXiv ID / 链接就直接精确检索（不进 LLM）──
+    provided_id = _extract_provided_arxiv_id(user_query)
+    if provided_id:
+        push_progress(_tid, f"🔗 识别到 arXiv ID：{provided_id}")
+        print(f"[Search] 正则命中 arXiv ID: {provided_id}")
+        raw_results = call_mcp_tool(
+            "get_paper_by_id", {"arxiv_id": provided_id}, server_name="openalex"
+        )
         papers = _parse_results(raw_results)
-
         if not papers:
-            # OpenAlex 找不到时用 ArXiv MCP 补充（对新论文或冷门论文更准）
             push_progress(_tid, "⚡ OpenAlex 未找到，尝试 ArXiv MCP...")
-            print(f"[Search] OpenAlex 未找到，回退 ArXiv MCP: {search_value}")
-            raw_results = call_mcp_tool("search_papers", {
-                "query": search_value, "max_results": 1,
-            }, server_name="arxiv")
+            raw_results = call_mcp_tool(
+                "search_papers", {"query": provided_id, "max_results": 1}, server_name="arxiv"
+            )
             if not _has_tool_error(raw_results):
                 papers = _parse_results(raw_results)
     else:
-        # 泛搜：直接走 OpenAlex，稳定无限流问题
-        search_query = _extract_query(user_query, llm)
-        push_progress(_tid, f"📡 查询 OpenAlex：{search_query}")
-        print(f"[Search] OpenAlex 泛搜: {search_query}")
-        raw_results = call_mcp_tool("search_papers", {
-            "query": search_query, "max_results": 5,
-        }, server_name="openalex")
-        papers = _parse_results(raw_results)
+        # ── Step 2: LLM 只判断「精确标题 vs 话题」，并给出检索串（不再回忆 ID）──
+        chat_context = build_context_str(state.get("messages", []))
+        intent = _classify_search_intent(user_query, chat_context, llm)
+        push_progress(_tid, f"🔍 意图识别：{intent.mode} → {intent.query}")
+        print(f"[Search] 意图: {intent.mode} → '{intent.query}'  ({intent.reason})")
 
-# ── Step 3 & 4: 解析结果 + 生成摘要 ──────────────────────
+        if intent.mode == "exact_title":
+            push_progress(_tid, f"📡 精确查询 OpenAlex：{intent.query}")
+            raw_results = call_mcp_tool(
+                "get_paper_by_title", {"title": intent.query}, server_name="openalex"
+            )
+            papers = _parse_results(raw_results)
+            if not papers:
+                push_progress(_tid, "⚡ OpenAlex 未找到，尝试 ArXiv MCP...")
+                raw_results = call_mcp_tool(
+                    "search_papers", {"query": intent.query, "max_results": 1}, server_name="arxiv"
+                )
+                if not _has_tool_error(raw_results):
+                    papers = _parse_results(raw_results)
+        else:
+            # ★ 关键修复：泛搜用结构化解析出的 intent.query（已含上下文/指代消解），
+            #   而非拿原始 user_query 再抽一次——否则前一步对上下文的理解会被完全丢弃。
+            push_progress(_tid, f"📡 查询 OpenAlex：{intent.query}")
+            print(f"[Search] OpenAlex 泛搜: {intent.query}")
+            raw_results = call_mcp_tool(
+                "search_papers", {"query": intent.query, "max_results": 5}, server_name="openalex"
+            )
+            papers = _parse_results(raw_results)
 
+    # ── Step 3 & 4: 解析结果 + 生成摘要 ──────────────────────
     if not papers:
         return {
             "search_results":   [],
             "papers_to_ingest": [],
             "error":            f"未找到与'{user_query}'相关的论文",
-            "search_attempted": True,    # ← 加这一行
+            "search_attempted": True,
             "messages": [AIMessage(content="搜索未找到相关论文，请尝试换个描述方式。")],
         }
 
@@ -308,6 +318,6 @@ def search_node(state: AgentState) -> dict:
         "search_results":   papers,
         "papers_to_ingest": papers,
         "error":            "",
-        "search_attempted": True,    # ← 加这一行
+        "search_attempted": True,
         "messages": [AIMessage(content=summary)],
     }

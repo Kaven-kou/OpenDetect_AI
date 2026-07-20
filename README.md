@@ -396,10 +396,12 @@ LANGGRAPH_STRICT_MSGPACK=false
 内置防死循环机制：`search_attempted` 确保搜索失败时不再重试；`rag_answer` / `final_report` 生成后直接收束到 FINISH；入库失败超过 2 次的论文永久放弃。
 
 ### Search Agent
-三阶段工作：
-1. **意图识别**：用 LLM + 对话上下文判断是特定著名论文（映射 arxiv ID）、标题（精确搜索）还是研究方向（关键词泛搜）；追问时（"还有吗"、"其他的"）从上下文提取核心话题，不会退化为 `deep learning` 等泛词
-2. **搜索策略**：精确查询走 OpenAlex 精确接口，找不到再用 ArXiv MCP 补充；泛搜直接走 OpenAlex，完全规避 ArXiv 限流等待
-3. **结果数量**：精确搜索返回 1 条，泛搜返回 5 条
+把语义理解拆成「确定性解析 + LLM 结构化判断 + 真正使用解析结果」三段，让规则做规则擅长的、LLM 只做非它不可的判断：
+1. **确定性解析(正则)**：用户明确给出的 arXiv ID / 链接直接正则识别(覆盖 `2010.11929`、`2010.11929v2`、`arxiv.org/abs|pdf/...`、旧式 `hep-th/9901001`),命中就精确检索,**不进 LLM、零幻觉**；正则只认明确给出的 ID,不从论文名推断
+2. **LLM 结构化判断**：没给 ID 时,才用 `with_structured_output(SearchIntent)` 判断这**唯一需要判断的事**——`exact_title`(点名某篇论文,填规范英文标题) vs `topic`(找某方向/追问延续,填英文关键词短语)；追问("还有吗")从上下文消解话题,不退化为 `deep learning`。**不让模型回忆 arxiv ID**——ID 的事实来源是搜索后端(OpenAlex/arXiv),不是模型参数记忆(治 arxiv ID 幻觉)
+3. **真正使用解析结果**：泛搜传给 OpenAlex 的就是 `intent.query`(已含上下文/指代消解),不再拿原始输入重抽一遍(修复了 keyword 分支丢弃解析结果的 bug);精确查询走 OpenAlex 精确接口,找不到再用 ArXiv MCP 补充。精确返回 1 条、泛搜 5 条
+
+> 相比"一个大 prompt 枚举情况A~F"的旧写法,能出错的面小一个量级:确定性的事交给正则、易幻觉的 ID 交给后端校验、`SearchIntent` 的 `Literal` 白名单杜绝手撕 JSON。arXiv 解析有全格式单测,泛搜"用的是 intent.query 而非原始输入"有回归单测锁死。
 
 ### Ingest Agent
 - **HITL 入库确认**：Web 会话下，搜索到论文后先用 `interrupt` 中断，把论文列表抛给前端让用户勾选；`resume` 返回选择后，仅入库勾选的论文，未选中的标记为已处理（避免重试）
