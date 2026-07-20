@@ -1,4 +1,4 @@
-.PHONY: help install dev run test integration-tests lint format eval
+.PHONY: help install dev run test integration-tests lint format eval intent-eval
 
 help:
 	@echo 'Targets:'
@@ -8,6 +8,7 @@ help:
 	@echo '  test                Run unit tests'
 	@echo '  integration-tests   Run integration tests'
 	@echo '  eval                Run RAG retrieval eval (baseline vs pipeline)'
+	@echo '  intent-eval         Run Search intent golden set (live model)'
 	@echo '  lint                Run Ruff checks'
 	@echo '  format              Format with Ruff'
 
@@ -28,6 +29,9 @@ integration-tests:
 
 eval:
 	uv run python -m opendetect_ai.eval.rag_eval
+
+intent-eval:
+	uv run python -m opendetect_ai.eval.intent_eval
 
 lint:
 	uv run python -m ruff check src tests
