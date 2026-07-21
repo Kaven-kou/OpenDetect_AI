@@ -12,6 +12,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver          # ← 新增
 from opendetect_ai.tools.rag_tool import list_ingested_papers
 from opendetect_ai.state import AgentState, create_initial_state
 from opendetect_ai.agents.resolve import resolve_node
+from opendetect_ai.agents.clarify import clarify_node
 from opendetect_ai.agents.supervisor import supervisor_node
 from opendetect_ai.agents.search import search_node
 from opendetect_ai.agents.ingest import ingest_node
@@ -29,12 +30,24 @@ def route(state: AgentState) -> str:
     return state.get("next", "FINISH")
 
 
+def route_after_resolve(state: AgentState) -> str:
+    """resolve 后：若本轮产生了「澄清」待确认动作，转 clarify 收束；否则进 supervisor。"""
+    pa = state.get("pending_action")
+    if pa and pa.get("kind") == "clarification":
+        return "clarify"
+    return "supervisor"
+
+
 def route_after_search(state: AgentState) -> str:
     """
-    Search 完成后的确定性边界：有待入库论文就直连 ingest，省掉一次 Supervisor LLM 调用；
-    没搜到（或都处理过了）才回 Supervisor 收尾。
-    —— LLM 只负责真正需要理解意图的决策，确定性转移交给状态机。
+    Search 完成后的确定性边界：
+      - 触发了澄清（多候选/冲突/找不到）→ clarify 收束；
+      - 有待入库论文 → 直连 ingest，省一次 Supervisor LLM；
+      - 否则回 Supervisor 收尾。
     """
+    pa = state.get("pending_action")
+    if pa and pa.get("kind") == "clarification":
+        return "clarify"
     pending = [p for p in state.get("papers_to_ingest", []) if not p.ingested]
     return "ingest" if pending else "supervisor"
 
@@ -64,6 +77,7 @@ def build_graph(checkpointer=None) -> StateGraph:
 
     # ── 注册节点 ───────────────────────────────────────────────
     builder.add_node("resolve",    resolve_node)
+    builder.add_node("clarify",    clarify_node)
     builder.add_node("supervisor", supervisor_node)
     builder.add_node("search",     search_node)
     builder.add_node("ingest",     ingest_node)
@@ -71,10 +85,15 @@ def build_graph(checkpointer=None) -> StateGraph:
     builder.add_node("report",     report_node)
     builder.add_node("verify",     verify_node)
 
-    # ── 入口：每轮先经 resolve 做上游查询解析，再进 supervisor ──
-    # resolve 只在 START→resolve→supervisor 执行一次；子 Agent 回 supervisor 不再经过它。
+    # ── 入口：每轮先经 resolve 做上游查询解析 ──────────────────
+    # resolve 只在 START→resolve 执行一次；指代歧义→clarify 收束，否则→supervisor。
     builder.set_entry_point("resolve")
-    builder.add_edge("resolve", "supervisor")
+    builder.add_conditional_edges(
+        "resolve",
+        route_after_resolve,
+        {"clarify": "clarify", "supervisor": "supervisor"},
+    )
+    builder.add_edge("clarify", END)   # 澄清是普通对话轮，问完即收束，等下一轮 resolve 解析回复
 
     # ── 条件路由：supervisor → 各子 Agent ─────────────────────
     builder.add_conditional_edges(
@@ -89,11 +108,11 @@ def build_graph(checkpointer=None) -> StateGraph:
         },
     )
 
-    # ── Search 后确定性边界：有待入库论文直连 ingest，否则回 supervisor ──
+    # ── Search 后确定性边界：澄清 / 有待入库论文直连 ingest / 否则回 supervisor ──
     builder.add_conditional_edges(
         "search",
         route_after_search,
-        {"ingest": "ingest", "supervisor": "supervisor"},
+        {"clarify": "clarify", "ingest": "ingest", "supervisor": "supervisor"},
     )
     # Ingest 完成后回 supervisor，由它按用户意图决定 rag / report / FINISH
     builder.add_edge("ingest",  "supervisor")

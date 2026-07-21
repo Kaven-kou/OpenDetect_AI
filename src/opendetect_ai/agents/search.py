@@ -21,6 +21,12 @@ from langchain_core.messages import HumanMessage, AIMessage
 from opendetect_ai.state import AgentState, PaperMeta, effective_query
 from opendetect_ai.tools.progress import push_progress
 from opendetect_ai.tools.mcp_client import call_mcp_tool
+from opendetect_ai.agents.clarify import (
+    judge_title_pool,
+    judge_entity_conflict,
+    build_clarify_pending,
+    _title_score,
+)
 from opendetect_ai.env_utils import (
     OPENDETECT_LLM_MODEL,
     OPENDETECT_LLM_BASE_URL,
@@ -233,6 +239,55 @@ def _has_tool_error(raw_results: list[dict] | dict | str) -> bool:
     return False
 
 
+# 从「同时给了标题 + arXiv ID」的输入里剥出用户所述标题，用于 entity_conflict 判定
+_CMD_WORDS = (
+    "帮我", "请", "麻烦", "入库", "收录", "下载", "这篇", "那篇", "这个", "那个",
+    "论文", "文章", "搜索", "搜一下", "找一下", "找", "一下", "把", "讲讲", "看看",
+)
+
+
+def _extract_stated_title(text: str, provided_id: str) -> str:
+    """去掉 arXiv ID / URL / 指令词后，剩下的当作用户所述标题；太短则返回 ''（视为没给标题）。"""
+    t = re.sub(r"https?://arxiv\.org/\S+", " ", text or "", flags=re.IGNORECASE)
+    t = re.sub(r"arxiv:\s*\S+", " ", t, flags=re.IGNORECASE)
+    t = t.replace(provided_id, " ")
+    for w in _CMD_WORDS:
+        t = t.replace(w, " ")
+    t = re.sub(r"[\s，。、：:；;的]+", " ", t).strip()
+    return t if len(t) >= 4 else ""
+
+
+def _clarify_search_return(pending: dict) -> dict:
+    """search 侧触发澄清：写入 pending_action、不产出待入库论文，交 clarify 节点渲染问题。"""
+    return {
+        "search_results":   [],
+        "papers_to_ingest": [],
+        "pending_action":   pending,
+        "search_attempted": True,
+        "error":            "",
+    }
+
+
+def _title_candidate_pool(query: str, _tid: str) -> tuple[list[PaperMeta], str]:
+    """
+    精确标题候选池：OpenAlex 取 5 篇；成功返回空时再问 ArXiv MCP。
+    返回 (papers, status)，status ∈ {ok, empty, error}——供 judge_title_pool 区分
+    「后端报错」与「成功返回空」（后者才可能是 exact_title_not_found）。
+    """
+    raw = call_mcp_tool("search_papers", {"query": query, "max_results": 5}, server_name="openalex")
+    if _has_tool_error(raw):
+        return [], "error"
+    papers = _parse_results(raw)
+    if papers:
+        return papers, "ok"
+    # OpenAlex 成功返回空 → 再问 ArXiv
+    push_progress(_tid, "⚡ OpenAlex 无结果，尝试 ArXiv MCP...")
+    raw2 = call_mcp_tool("search_papers", {"query": query, "max_results": 5}, server_name="arxiv")
+    if not _has_tool_error(raw2):
+        papers = _parse_results(raw2)
+    return papers, ("ok" if papers else "empty")
+
+
 def search_node(state: AgentState) -> dict:
     user_query = effective_query(state)   # 用上游 resolve 出的自包含 query
     _tid = state.get("thread_id", "default")
@@ -247,6 +302,14 @@ def search_node(state: AgentState) -> dict:
             "get_paper_by_id", {"arxiv_id": provided_id}, server_name="openalex"
         )
         papers = _parse_results(raw_results)
+        # entity_conflict：用户同时给了标题，且与按 ID 取回的标题明显不一致 → 澄清
+        stated = _extract_stated_title(user_query, provided_id)
+        if stated and papers:
+            conflict = judge_entity_conflict(stated, papers[0].title)
+            if conflict:
+                push_progress(_tid, "❓ 标题与 arXiv ID 不一致，需澄清")
+                print(f"[Search] entity_conflict: 「{stated}」 vs 「{papers[0].title}」")
+                return _clarify_search_return(build_clarify_pending(conflict, user_query))
         if not papers:
             push_progress(_tid, "⚡ OpenAlex 未找到，尝试 ArXiv MCP...")
             raw_results = call_mcp_tool(
@@ -261,18 +324,18 @@ def search_node(state: AgentState) -> dict:
         print(f"[Search] 意图: {intent.mode} → '{intent.query}'  ({intent.reason})")
 
         if intent.mode == "exact_title":
-            push_progress(_tid, f"📡 精确查询 OpenAlex：{intent.query}")
-            raw_results = call_mcp_tool(
-                "get_paper_by_title", {"title": intent.query}, server_name="openalex"
-            )
-            papers = _parse_results(raw_results)
-            if not papers:
-                push_progress(_tid, "⚡ OpenAlex 未找到，尝试 ArXiv MCP...")
-                raw_results = call_mcp_tool(
-                    "search_papers", {"query": intent.query, "max_results": 1}, server_name="arxiv"
-                )
-                if not _has_tool_error(raw_results):
-                    papers = _parse_results(raw_results)
+            # 取候选池 → 判定：多个接近候选(multiple_papers) / 两后端皆空(not_found) → 澄清
+            push_progress(_tid, f"📡 精确标题候选池 OpenAlex：{intent.query}")
+            papers, status = _title_candidate_pool(intent.query, _tid)
+            pool = [{"title": p.title, "arxiv_id": p.arxiv_id} for p in papers]
+            decision = judge_title_pool(intent.query, pool, status)
+            if decision:
+                push_progress(_tid, f"❓ 精确标题需澄清：{decision.reason}")
+                print(f"[Search] 精确标题澄清: {decision.reason}")
+                return _clarify_search_return(build_clarify_pending(decision, intent.query))
+            # 无需澄清：从候选池里挑最匹配的一篇入库
+            if papers:
+                papers = [max(papers, key=lambda p: _title_score(intent.query, p.title))]
         else:
             # ★ 关键修复：泛搜用结构化解析出的 intent.query（已含上下文/指代消解），
             #   而非拿原始 user_query 再抽一次——否则前一步对上下文的理解会被完全丢弃。

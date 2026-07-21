@@ -6,6 +6,7 @@
 from langchain_core.messages import HumanMessage, AIMessage
 
 from opendetect_ai.agents import resolve as resolve_mod
+from opendetect_ai.agents.clarify import ResolveResult
 from opendetect_ai.agents.resolve import (
     resolve_node,
     _confirm_verdict,
@@ -16,14 +17,15 @@ from opendetect_ai.agents.resolve import (
 
 
 def _spy_rewrite(monkeypatch) -> list:
-    """把 _rewrite_with_llm 换成计数桩，避免触网，同时统计是否走了 LLM 路径。"""
+    """把引用解析 LLM 调用换成计数桩（返回改写、无歧义），避免触网并统计是否走了 LLM 路径。"""
     calls: list = []
 
-    def fake(raw, ctx):
-        calls.append((raw, ctx))
-        return f"REWRITTEN::{raw}"
+    def fake_resolver(raw, msgs):
+        calls.append((raw, msgs))
+        return ResolveResult(resolved_query=f"REWRITTEN::{raw}", candidates=[])
 
-    monkeypatch.setattr(resolve_mod, "_rewrite_with_llm", fake)
+    monkeypatch.setattr(resolve_mod, "resolve_reference_llm", fake_resolver)
+    monkeypatch.setattr(resolve_mod, "judge_reference", lambda raw, msgs, res: None)
     return calls
 
 
@@ -118,3 +120,42 @@ def test_make_search_pending() -> None:
     p = make_search_pending("讲讲 LoRA")
     assert p["kind"] == "search"
     assert "讲讲 LoRA" in p["query"]
+
+
+# ── 澄清选择：resolve 里对 clarification pending 的确定性处理 ────
+_CLARIFY_PENDING = {
+    "kind": "clarification", "reason": "multiple_papers", "original_query": "找 BERT",
+    "question": "哪一篇？", "attempts": 1,
+    "options": [
+        {"id": "1", "label": "BERT: Pre-training of Deep...", "resolved_query": "帮我入库 arXiv:1810.04805"},
+        {"id": "2", "label": "RoBERTa: A Robustly Optimized...", "resolved_query": "帮我入库 arXiv:1907.11692"},
+    ],
+}
+
+
+def test_resolve_clarify_select(monkeypatch) -> None:
+    _spy_rewrite(monkeypatch)
+    out = resolve_node({"user_query": "第2篇", "messages": [], "pending_action": dict(_CLARIFY_PENDING)})
+    assert out["resolved_query"] == "帮我入库 arXiv:1907.11692"
+    assert out["pending_action"] is None
+
+
+def test_resolve_clarify_clear_on_reject(monkeypatch) -> None:
+    _spy_rewrite(monkeypatch)
+    out = resolve_node({"user_query": "都不是", "messages": [], "pending_action": dict(_CLARIFY_PENDING)})
+    assert out["pending_action"] is None
+
+
+def test_resolve_clarify_reclarify_increments(monkeypatch) -> None:
+    _spy_rewrite(monkeypatch)
+    out = resolve_node({"user_query": "不确定", "messages": [], "pending_action": dict(_CLARIFY_PENDING)})
+    assert out["pending_action"]["kind"] == "clarification"
+    assert out["pending_action"]["attempts"] == 2       # 再问一次
+
+
+def test_resolve_clarify_fallback_when_maxed(monkeypatch) -> None:
+    _spy_rewrite(monkeypatch)
+    p = {**_CLARIFY_PENDING, "attempts": 2}
+    out = resolve_node({"user_query": "不确定", "messages": [], "pending_action": p})
+    assert out["pending_action"]["reason"] == "fallback"   # 达上限 → 兜底
+    assert out["pending_action"]["options"] == []
