@@ -1,4 +1,4 @@
-.PHONY: help install dev run test integration-tests lint format eval intent-eval clarify-eval
+.PHONY: help install dev run test integration-tests lint format eval intent-eval clarify-eval route-eval
 
 help:
 	@echo 'Targets:'
@@ -9,6 +9,8 @@ help:
 	@echo '  integration-tests   Run integration tests'
 	@echo '  eval                Run RAG retrieval eval (baseline vs pipeline)'
 	@echo '  intent-eval         Run Search intent golden set (live model)'
+	@echo '  clarify-eval        Run clarification judgment golden set (live model)'
+	@echo '  route-eval          Run Supervisor routing golden set (live model)'
 	@echo '  lint                Run Ruff checks'
 	@echo '  format              Format with Ruff'
 
@@ -35,6 +37,9 @@ intent-eval:
 
 clarify-eval:
 	uv run python -m opendetect_ai.eval.clarify_eval
+
+route-eval:
+	uv run python -m opendetect_ai.eval.route_eval
 
 lint:
 	uv run python -m ruff check src tests
