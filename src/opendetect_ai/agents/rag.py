@@ -8,9 +8,10 @@ from __future__ import annotations
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, AIMessage
 
-from opendetect_ai.state import AgentState
+from opendetect_ai.state import AgentState, effective_query
 from opendetect_ai.context_utils import build_context_str
 from opendetect_ai.tools.progress import push_progress
+from opendetect_ai.agents.resolve import answer_offers_search, make_search_pending
 from opendetect_ai.prompts import RAG_PROMPT
 from opendetect_ai.tools.rag_tool import retrieve_context
 from opendetect_ai.env_utils import (
@@ -53,7 +54,7 @@ def rag_node(state: AgentState) -> dict:
     2. 拼装 prompt，调用 LLM 生成回答
     3. 把答案写入 state.rag_answer
     """
-    user_query = state.get("user_query", "")
+    user_query = effective_query(state)
 
     # ── Step 1: 向量检索 ───────────────────────────────────────
     push_progress(_tid, f"🔎 向量检索：{user_query[:40]}...")
@@ -95,9 +96,15 @@ def rag_node(state: AgentState) -> dict:
 
     print(f"[RAG] 生成回答（前100字）: {answer[:100]}...")
 
-    return {
+    result = {
         "rag_context": chunks,
         "rag_answer":  answer,
         "error":       "",
         "messages":    [AIMessage(content=answer)],
     }
+    # 若回答是在「提议去搜索入库」（库里没有相关论文），写入 pending_action，
+    # 下一轮用户回「好啊」时 resolve 节点会确定性地承接为一次搜索，无需再猜。
+    if answer_offers_search(answer):
+        result["pending_action"] = make_search_pending(user_query)
+        print(f"[RAG] 写入 pending_action(search): {user_query}")
+    return result

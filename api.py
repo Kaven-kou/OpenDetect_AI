@@ -19,6 +19,7 @@ from typing import Any
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from langchain_core.messages import AIMessage
 from pydantic import BaseModel
 from opendetect_ai.tools.progress import drain_queue, cleanup_queue
 
@@ -95,6 +96,8 @@ def _extract_answer(accumulated: dict) -> dict:
     # 从消息列表里逆序找最后一条有实质内容的消息
     last_content = ""
     for msg in reversed(messages):
+        if not isinstance(msg, AIMessage):     # 跳过用户 HumanMessage，绝不把用户输入当答案回显
+            continue
         content = msg.content if hasattr(msg, "content") else str(msg)
         if content and not _is_routing_message(content):
             last_content = content

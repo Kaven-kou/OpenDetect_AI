@@ -26,6 +26,8 @@
 ```
 用户输入
     ↓
+Resolve Agent（上游查询解析：省略/指代/确认 → 自包含 resolved_query，每轮一次）
+    ↓
 Supervisor Agent（意图识别 · 动态路由 · 状态管理）
     ↓ 条件路由（含长期记忆 + 短期上下文注入）
 ┌──────────┬──────────┬──────────┬──────────┐
@@ -45,6 +47,7 @@ Supervisor Agent（意图识别 · 动态路由 · 状态管理）
            END → 异步提取用户偏好 → SQLite
 ```
 
+> 每轮先经 **Resolve** 做上游查询解析（只在入口执行一次，子 Agent 回流只到 Supervisor）：把"好啊""还有吗""它呢"等省略/指代/确认式输入解析成自包含的 `resolved_query`，下游统一用 `effective_query()` 读取，不覆写原始 `user_query`。普通问题 0 次 LLM 直接透传，确认词走确定性规则，只有真正的指代/追问才花 1 次改写。
 > Web 会话下，Ingest 前会插入 **Human-in-the-Loop** 确认关卡（`interrupt` → 用户勾选 → `resume`）；RAG 回答经 **Verifier** 校验事实性后结束，最终答案 **token 级流式**推送。Search 有结果时**直连 Ingest**（确定性边界，省一次 Supervisor LLM）。
 
 ---
@@ -391,14 +394,22 @@ LANGGRAPH_STRICT_MSGPACK=false
 - 任何知识 / 技术 / 概念问题（"XX 是什么"、"XX 与 YY 的区别"）→ **一律走 RAG**，由文献支撑作答；库里没有相关论文时，RAG 会**如实说明并主动提议去搜索入库**，而不是用模型自身知识编造（严格"答案有出处"）；
 - 只有库还空着时，才由 Supervisor 直接提示"暂无相关论文，要我去搜一批吗？"。
 
-**多轮意图承接（query rewriting）**：`RouteDecision` 带一个 `rewritten_query` 字段。当上一轮助手提议过"要我去搜索入库吗？"、用户本轮只回"**好啊 / 可以 / 行**"这类**不含主题**的确认时，Supervisor 会路由到 `search` 并把 `rewritten_query` 补成完整问题（从上一轮取主题，如"讲讲 LoRA 低秩适配"），用它替换本轮无主题的 `user_query`。于是下游 `search → ingest → rag` 全程拿到自包含的问题，"好啊"也能正确触发搜索、并最终回答原问题——省略式追问在有状态的多智能体图里由路由节点顺手补全，一处改写让整条链路受益。
+**承接上一轮提议（pending_action）**：Supervisor / RAG 在提议"要我去搜索入库吗？"时，会把一条待确认动作 `pending_action = {"kind":"search","query": ...}` 写入状态。下一轮用户回"好啊"，由**上游 Resolve 节点确定性地**承接（见下）——Supervisor 自己**不再做 query 改写、不再输出 `rewritten_query`**，指代/确认统一收在上游一处。
 
 内置防死循环机制：`search_attempted` 确保搜索失败时不再重试；`rag_answer` / `final_report` 生成后直接收束到 FINISH；入库失败超过 2 次的论文永久放弃。
+
+### Resolve Agent（上游查询解析）
+每轮对话的入口节点（`START → resolve → supervisor`，只执行一次），把省略/指代/确认式输入解析成**自包含**的 `resolved_query`，让下游只面对干净问题。**只新增字段、不覆写 `user_query`**，下游统一用 `effective_query()` 读取，便于日志/评测/后续迁移 TaskSpec。两道**确定性闸门**把成本压住，独立节点不会退化成"每条消息固定多一次 LLM 调用"：
+1. **确认/拒绝**（有 `pending_action` 时）：`好啊/可以/嗯` 等用词表 + 贪心匹配判定，**0 次 LLM**，承接为一次显式搜索并清空 pending；`不用了/算了` → 清空；夹带新任务 → 清空后按普通输入走。
+2. **是否需要改写**：含 `还有吗/它/这个/更多` 等指代标记才借上下文改写（**1 次 LLM**）；普通自包含问题**0 次**直接透传。
+
+> 顺带修了一个潜藏 bug：此前全流程只往 `messages` 追加 AIMessage、从不记录用户的 HumanMessage，`build_context_str` 恒为空——"短期记忆/指代消解"其实从未真正生效。Resolve 记录每轮 HumanMessage 后，短期上下文才真正可用。
+> 语义链评测：`make intent-eval` 跑 `resolve → SearchIntent` 全链路 golden set（21 条），当前 21/21，且 resolve 改写 LLM 调用恰为指代类用例数（自包含/确认类为 0），把"职责更清晰但成本回退"这条红线焊死。
 
 ### Search Agent
 把语义理解拆成「确定性解析 + LLM 结构化判断 + 真正使用解析结果」三段，让规则做规则擅长的、LLM 只做非它不可的判断：
 1. **确定性解析(正则)**：用户明确给出的 arXiv ID / 链接直接正则识别(覆盖 `2010.11929`、`2010.11929v2`、`arxiv.org/abs|pdf/...`、旧式 `hep-th/9901001`),命中就精确检索,**不进 LLM、零幻觉**；正则只认明确给出的 ID,不从论文名推断
-2. **LLM 结构化判断**：没给 ID 时,才用 `with_structured_output(SearchIntent)` 判断这**唯一需要判断的事**——`exact_title`(点名某篇论文,填规范英文标题) vs `topic`(找某方向/追问延续,填英文关键词短语)；追问("还有吗")从上下文消解话题,不退化为 `deep learning`。**不让模型回忆 arxiv ID**——ID 的事实来源是搜索后端(OpenAlex/arXiv),不是模型参数记忆(治 arxiv ID 幻觉)
+2. **LLM 结构化判断**：没给 ID 时,才用 `with_structured_output(SearchIntent)` 判断这**唯一需要判断的事**——`exact_title`(点名某篇论文,填规范英文标题) vs `topic`(找某方向,填英文关键词短语)。输入已是上游 Resolve 出的**自包含 query**,所以分类器**不再读对话历史做指代消解**（指代已在上游解决），只做标题/话题这一件判断。**不让模型回忆 arxiv ID**——ID 的事实来源是搜索后端(OpenAlex/arXiv),不是模型参数记忆(治 arxiv ID 幻觉)
 3. **真正使用解析结果**：泛搜传给 OpenAlex 的就是 `intent.query`(已含上下文/指代消解),不再拿原始输入重抽一遍(修复了 keyword 分支丢弃解析结果的 bug);精确查询走 OpenAlex 精确接口,找不到再用 ArXiv MCP 补充。精确返回 1 条、泛搜 5 条
 
 > 相比"一个大 prompt 枚举情况A~F"的旧写法,能出错的面小一个量级:确定性的事交给正则、易幻觉的 ID 交给后端校验、`SearchIntent` 的 `Literal` 白名单杜绝手撕 JSON。arXiv 解析有全格式单测,泛搜"用的是 intent.query 而非原始输入"有回归单测锁死。

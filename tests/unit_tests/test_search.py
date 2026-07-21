@@ -50,7 +50,7 @@ def test_topic_uses_intent_query_not_raw_input(monkeypatch) -> None:
     calls = _capture_mcp(monkeypatch)
     monkeypatch.setattr(
         search_mod, "_classify_search_intent",
-        lambda uq, ctx, llm: SearchIntent(mode="topic", query="LoRA low-rank adaptation"),
+        lambda uq, llm: SearchIntent(mode="topic", query="LoRA low-rank adaptation"),
     )
     search_mod.search_node({"user_query": "好啊", "messages": []})
     hits = [c for c in calls if c[0] == "search_papers"]
@@ -62,7 +62,7 @@ def test_exact_title_uses_intent_query(monkeypatch) -> None:
     calls = _capture_mcp(monkeypatch)
     monkeypatch.setattr(
         search_mod, "_classify_search_intent",
-        lambda uq, ctx, llm: SearchIntent(mode="exact_title", query="Attention Is All You Need"),
+        lambda uq, llm: SearchIntent(mode="exact_title", query="Attention Is All You Need"),
     )
     search_mod.search_node({"user_query": "找 Attention 那篇", "messages": []})
     hits = [c for c in calls if c[0] == "get_paper_by_title"]

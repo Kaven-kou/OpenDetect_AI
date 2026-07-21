@@ -46,7 +46,9 @@ class AgentState(dict):
     """
 
     messages:         Annotated[list[BaseMessage], operator.add]
-    user_query:       str
+    user_query:       str            # 用户本轮原始输入（永不覆写，供日志/评测/回溯）
+    resolved_query:   str            # 上游 resolve 出的自包含检索问题；下游用 effective_query() 读取
+    pending_action:   dict[str, Any] | None  # 系统提出的待确认动作 {"kind","query"}；确认时消费、拒绝/新任务时清空
     next:             str
     search_results:   list[PaperMeta]
     papers_to_ingest: list[PaperMeta]
@@ -64,6 +66,14 @@ class AgentState(dict):
     user_id:          str            # 用户标识，长期记忆按此隔离（跨会话）
 
 
+def effective_query(state: dict) -> str:
+    """
+    下游 Agent 统一入口：优先用上游 resolve_query 产出的自包含 query，回退到原始输入。
+    不覆写 user_query——原始输入始终保留，便于日志、评测和后续迁移到 TaskSpec。
+    """
+    return state.get("resolved_query") or state.get("user_query", "")
+
+
 # ── 初始状态工厂函数 ───────────────────────────────────────────
 def create_initial_state(user_query: str) -> AgentState:
     """
@@ -73,6 +83,8 @@ def create_initial_state(user_query: str) -> AgentState:
     return AgentState(
         messages=[],
         user_query=user_query,
+        resolved_query="",
+        pending_action=None,
         next="supervisor",
         search_results=[],
         papers_to_ingest=[],

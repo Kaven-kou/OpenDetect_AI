@@ -11,6 +11,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver          # ← 新增
 
 from opendetect_ai.tools.rag_tool import list_ingested_papers
 from opendetect_ai.state import AgentState, create_initial_state
+from opendetect_ai.agents.resolve import resolve_node
 from opendetect_ai.agents.supervisor import supervisor_node
 from opendetect_ai.agents.search import search_node
 from opendetect_ai.agents.ingest import ingest_node
@@ -46,19 +47,23 @@ def build_graph(checkpointer=None) -> StateGraph:
     图结构：
         __start__
             ↓
+        resolve  （每轮一次：把省略/指代/确认式输入解析成自包含 resolved_query）
+            ↓
         supervisor  ←──────────────┐
             ↓ (条件路由)            │
       ┌─────┴──────┬─────┬────────┐│
     search       ingest  rag    report
       └────────────┘      │       │
             ↓             ↓       ↓
-        supervisor       END     END
-            ↓ (next == FINISH)
-           END
+        supervisor       verify  END
+            ↓ (next == FINISH)   ↓
+           END                  END
+    —— resolve 只在 START→resolve→supervisor 执行一次；子 Agent 回流只到 supervisor。
     """
     builder = StateGraph(AgentState)
 
     # ── 注册节点 ───────────────────────────────────────────────
+    builder.add_node("resolve",    resolve_node)
     builder.add_node("supervisor", supervisor_node)
     builder.add_node("search",     search_node)
     builder.add_node("ingest",     ingest_node)
@@ -66,8 +71,10 @@ def build_graph(checkpointer=None) -> StateGraph:
     builder.add_node("report",     report_node)
     builder.add_node("verify",     verify_node)
 
-    # ── 入口：从 supervisor 开始 ───────────────────────────────
-    builder.set_entry_point("supervisor")
+    # ── 入口：每轮先经 resolve 做上游查询解析，再进 supervisor ──
+    # resolve 只在 START→resolve→supervisor 执行一次；子 Agent 回 supervisor 不再经过它。
+    builder.set_entry_point("resolve")
+    builder.add_edge("resolve", "supervisor")
 
     # ── 条件路由：supervisor → 各子 Agent ─────────────────────
     builder.add_conditional_edges(
@@ -164,6 +171,8 @@ def build_turn_input(chat_graph, config: dict, user_query: str, thread_id: str,
     if current.values:
         return {
             "user_query":       user_query,
+            "resolved_query":   "",
+            "pending_action":   current.values.get("pending_action"),
             "next":             "supervisor",
             "search_attempted": False,
             "rag_answer":       "",

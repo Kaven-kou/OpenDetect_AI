@@ -56,54 +56,51 @@ def test_verify_adds_caveat_when_no_context(monkeypatch) -> None:
     assert out["rag_answer"].startswith("ViT 很强")
 
 
-# ── Supervisor 承接上一轮意图：query rewriting ────────────────────
+# ── Supervisor 模式B 提议搜索时写入 pending_action（承接逻辑已移到 resolve 节点）──
 def _patch_supervisor_side_effects(monkeypatch) -> None:
-    """屏蔽 supervisor_node 里会触库/触网的副作用，只测路由与改写逻辑。"""
+    """屏蔽 supervisor_node 里会触库/触网的副作用，只测路由与 pending_action 写入。"""
     monkeypatch.setattr(sup_mod, "load_user_profile", lambda uid="default": {})
     monkeypatch.setattr(sup_mod, "format_profile_for_prompt", lambda p: "")
     monkeypatch.setattr(sup_mod, "push_progress", lambda *a, **k: None)
 
 
-def test_supervisor_applies_rewritten_query(monkeypatch) -> None:
-    """
-    用户对上一轮"要我去搜索吗？"回复"好啊" → supervisor 用改写后的完整问题
-    替换本轮无主题的 user_query，供下游 search/rag 检索（多轮意图承接的核心）。
-    """
+def test_supervisor_sets_pending_on_search_offer(monkeypatch) -> None:
+    """库空 + 知识问题 → 模式B 提议搜索时，写入 pending_action，供下一轮 resolve 承接。"""
     _patch_supervisor_side_effects(monkeypatch)
     monkeypatch.setattr(
         sup_mod, "_route_with_llm",
         lambda prompt: RouteDecision(
-            next="search", reason="确认搜索", reply="",
-            rewritten_query="讲讲 LoRA 低秩适配",
+            next="FINISH", reason="库空，提议搜索",
+            reply="我的文献库里还没有相关论文。要我去搜索并入库一批相关论文吗？",
         ),
     )
-    out = supervisor_node({"user_query": "好啊", "messages": []})
-    assert out["next"] == "search"
-    assert out["user_query"] == "讲讲 LoRA 低秩适配"
+    out = supervisor_node({"user_query": "讲讲 LoRA", "messages": []})
+    assert out["next"] == "FINISH"
+    assert out["pending_action"] == {
+        "kind": "search",
+        "query": "帮我搜索并入库与「讲讲 LoRA」相关的论文",
+    }
 
 
-def test_supervisor_no_rewrite_keeps_original_query(monkeypatch) -> None:
-    """未改写（rewritten_query 为空）时，绝不覆盖 user_query。"""
+def test_supervisor_no_pending_when_not_offering(monkeypatch) -> None:
+    """普通闲聊回复（不含搜索提议）→ 不写 pending_action。"""
     _patch_supervisor_side_effects(monkeypatch)
     monkeypatch.setattr(
         sup_mod, "_route_with_llm",
-        lambda prompt: RouteDecision(next="rag", reason="知识问题", reply=""),
-    )
-    out = supervisor_node({"user_query": "讲讲LoRA", "messages": []})
-    assert out["next"] == "rag"
-    assert "user_query" not in out   # 未改写不写回，避免误覆盖
-
-
-def test_supervisor_rewrite_ignored_when_finish(monkeypatch) -> None:
-    """即便模型误填了 rewritten_query，路由到 FINISH 时也不应改写 user_query。"""
-    _patch_supervisor_side_effects(monkeypatch)
-    monkeypatch.setattr(
-        sup_mod, "_route_with_llm",
-        lambda prompt: RouteDecision(
-            next="FINISH", reason="闲聊", reply="你好",
-            rewritten_query="不该生效的改写",
-        ),
+        lambda prompt: RouteDecision(next="FINISH", reason="打招呼", reply="你好呀！我是 OpenDetect AI"),
     )
     out = supervisor_node({"user_query": "你好", "messages": []})
     assert out["next"] == "FINISH"
-    assert "user_query" not in out
+    assert "pending_action" not in out
+
+
+def test_supervisor_reads_resolved_query(monkeypatch) -> None:
+    """supervisor 走 effective_query：有 resolved_query 时提议话术里带的是 resolved_query。"""
+    _patch_supervisor_side_effects(monkeypatch)
+    monkeypatch.setattr(
+        sup_mod, "_route_with_llm",
+        lambda prompt: RouteDecision(next="FINISH", reason="库空", reply="要我去搜一批相关论文吗？"),
+    )
+    out = supervisor_node({"user_query": "好啊", "resolved_query": "讲讲 LoRA 低秩适配", "messages": []})
+    assert out["pending_action"]["query"] == "帮我搜索并入库与「讲讲 LoRA 低秩适配」相关的论文"
+

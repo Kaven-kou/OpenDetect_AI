@@ -18,8 +18,7 @@ from pydantic import BaseModel, Field
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, AIMessage
 
-from opendetect_ai.state import AgentState, PaperMeta
-from opendetect_ai.context_utils import build_context_str
+from opendetect_ai.state import AgentState, PaperMeta, effective_query
 from opendetect_ai.tools.progress import push_progress
 from opendetect_ai.tools.mcp_client import call_mcp_tool
 from opendetect_ai.env_utils import (
@@ -90,21 +89,13 @@ class SearchIntent(BaseModel):
     reason: str = Field(default="", description="一句话说明判断依据")
 
 
-def _classify_search_intent(user_query: str, chat_context: str, llm: ChatOpenAI) -> SearchIntent:
+def _classify_search_intent(user_query: str, llm: ChatOpenAI) -> SearchIntent:
     """
     判断用户想「精确找某篇论文」还是「找某方向的多篇」，并给出要传给搜索后端的英文检索串。
-    不再让模型回忆 arxiv ID（ID 由正则前置识别、由搜索后端校验）；失败时 fail-open 到 topic。
-    用字符串拼接注入上下文，避免 .format() 撞上 chat_context 里可能出现的花括号。
+    输入已是上游 resolve 出的**自包含** query，因此这里**不再读对话历史做指代消解**——
+    只做「标题 vs 话题」这一件需要判断的事。不再让模型回忆 arxiv ID（由正则前置、后端校验）。
+    失败时 fail-open 到 topic。
     """
-    ctx_section = ""
-    if chat_context:
-        ctx_section = (
-            "\n## 对话上下文（最近几轮，用于消解指代和追问）\n"
-            + chat_context
-            + "\n提示：用户用「它 / 这个 / 还有吗 / 更多」等指代或追问时，"
-            "必须从上下文提取当前话题作为 query，不要用 deep learning 这种泛词。\n"
-        )
-
     instructions = (
         "你是深度学习论文检索助手。判断用户的搜索意图，输出结构化结果。\n\n"
         "## 两种模式\n"
@@ -118,7 +109,7 @@ def _classify_search_intent(user_query: str, chat_context: str, llm: ChatOpenAI)
         "- query 一律英文；只依据用户明确表达判断，别脑补\n"
     )
 
-    prompt = instructions + ctx_section + "\n## 用户输入\n" + user_query
+    prompt = instructions + "\n## 用户输入\n" + user_query
 
     try:
         result = llm.with_structured_output(
@@ -243,7 +234,7 @@ def _has_tool_error(raw_results: list[dict] | dict | str) -> bool:
 
 
 def search_node(state: AgentState) -> dict:
-    user_query = state.get("user_query", "")
+    user_query = effective_query(state)   # 用上游 resolve 出的自包含 query
     _tid = state.get("thread_id", "default")
     llm = _get_llm()
 
@@ -264,9 +255,8 @@ def search_node(state: AgentState) -> dict:
             if not _has_tool_error(raw_results):
                 papers = _parse_results(raw_results)
     else:
-        # ── Step 2: LLM 只判断「精确标题 vs 话题」，并给出检索串（不再回忆 ID）──
-        chat_context = build_context_str(state.get("messages", []))
-        intent = _classify_search_intent(user_query, chat_context, llm)
+        # ── Step 2: LLM 只判断「精确标题 vs 话题」，并给出检索串（不再回忆 ID / 不读历史）──
+        intent = _classify_search_intent(user_query, llm)
         push_progress(_tid, f"🔍 意图识别：{intent.mode} → {intent.query}")
         print(f"[Search] 意图: {intent.mode} → '{intent.query}'  ({intent.reason})")
 

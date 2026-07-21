@@ -8,7 +8,7 @@ from __future__ import annotations
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, AIMessage
 
-from opendetect_ai.state import AgentState
+from opendetect_ai.state import AgentState, effective_query
 from opendetect_ai.context_utils import build_context_str
 from opendetect_ai.tools.progress import push_progress
 from opendetect_ai.prompts import REPORT_PROMPT
@@ -64,7 +64,7 @@ def report_node(state: AgentState) -> dict:
     3. 调用 LLM 生成结构化综述
     4. 把综述写入 state.final_report
     """
-    user_query = state.get("user_query", "")
+    user_query = effective_query(state)
 
     # ── Step 1: 获取已入库论文列表 ─────────────────────────────
     ingested = list_ingested_papers.invoke({})

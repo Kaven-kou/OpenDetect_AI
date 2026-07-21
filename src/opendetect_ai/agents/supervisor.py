@@ -12,9 +12,10 @@ from pydantic import BaseModel, Field
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, AIMessage
  
-from opendetect_ai.state import AgentState
+from opendetect_ai.state import AgentState, effective_query
 from opendetect_ai.context_utils import build_context_str
 from opendetect_ai.user_memory import load_user_profile, format_profile_for_prompt
+from opendetect_ai.agents.resolve import answer_offers_search, make_search_pending
 from opendetect_ai.tools.progress import push_progress
 from opendetect_ai.prompts import SUPERVISOR_PROMPT
 from opendetect_ai.env_utils import (
@@ -48,13 +49,6 @@ class RouteDecision(BaseModel):
     reply: str = Field(
         default="",
         description="仅当用户是闲聊/问身份/问能力时，在此生成中文友好回复（Markdown）；任务类请求留空字符串",
-    )
-    rewritten_query: str = Field(
-        default="",
-        description=(
-            "把用户省略/指代/确认式的话（如承接上一轮搜索提议时的\"好啊\"）改写成完整、"
-            "自包含的检索问题；无需改写时留空字符串"
-        ),
     )
 
 
@@ -90,7 +84,6 @@ def _route_with_llm(prompt: str) -> RouteDecision:
             next=nxt if nxt in VALID_NEXT else "FINISH",
             reason=data.get("reason", ""),
             reply=data.get("reply", "") or "",
-            rewritten_query=data.get("rewritten_query", "") or "",
         )
     except Exception as exc:
         return RouteDecision(next="FINISH", reason=f"路由解析失败: {exc}", reply="")
@@ -146,7 +139,7 @@ def supervisor_node(state: AgentState) -> dict:
     prompt = SUPERVISOR_PROMPT.format(
         user_profile    = profile_str,
         chat_context    = ctx_display,
-        user_query      = state.get("user_query", ""),
+        user_query      = effective_query(state),
         search_count    = len(state.get("search_results", [])),
         ingested_count  = state.get("ingested_count", 0),
         pending_count   = pending_count,
@@ -161,7 +154,6 @@ def supervisor_node(state: AgentState) -> dict:
     next_agent    = decision.next
     reason        = decision.reason
     direct_answer = decision.reply
-    rewritten     = (decision.rewritten_query or "").strip()
 
     # Literal 已约束 next 合法；保留一次防御性兜底
     if next_agent not in VALID_NEXT:
@@ -184,11 +176,10 @@ def supervisor_node(state: AgentState) -> dict:
         "messages":      [AIMessage(content=msg_content)],
     }
 
-    # 承接上一轮的省略/确认式输入（如"好啊"确认搜索）：用改写后的完整问题替换本轮 user_query，
-    # 让下游 search / rag / report 拿到自包含的检索问题，而不是无主题的"好啊"。
-    if rewritten and next_agent in {"search", "rag", "report"}:
-        result["user_query"] = rewritten
-        print(f"[Supervisor] 改写 user_query → '{rewritten}'（承接上一轮意图）")
-        push_progress(_tid, f"✍️ 补全意图：{rewritten[:40]}")
+    # 模式B：库里没有相关论文、主动提议搜索时（reply 含提议话术），写入 pending_action，
+    # 下一轮用户「好啊」由 resolve 节点确定性承接为搜索——承接逻辑统一收在上游，不在这里改写 query。
+    if answer_offers_search(direct_answer):
+        result["pending_action"] = make_search_pending(effective_query(state))
+        print(f"[Supervisor] 写入 pending_action(search): {effective_query(state)}")
 
     return result
