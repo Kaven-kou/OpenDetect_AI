@@ -1,4 +1,4 @@
-.PHONY: help install dev run test integration-tests lint format eval intent-eval
+.PHONY: help install dev run test integration-tests lint format eval intent-eval clarify-eval
 
 help:
 	@echo 'Targets:'
@@ -32,6 +32,9 @@ eval:
 
 intent-eval:
 	uv run python -m opendetect_ai.eval.intent_eval
+
+clarify-eval:
+	uv run python -m opendetect_ai.eval.clarify_eval
 
 lint:
 	uv run python -m ruff check src tests
