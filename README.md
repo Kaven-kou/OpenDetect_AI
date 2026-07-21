@@ -160,7 +160,8 @@ make integration-tests  # 最短集成链路，需要模型配置
 make lint               # Ruff
 make eval               # RAG 检索评测
 make intent-eval        # Resolve -> SearchIntent 在线评测
-make clarify-eval       # Clarify 判定评测，尚不代表已接入 Graph
+make clarify-eval       # Clarify 判定评测
+make route-eval         # Supervisor 路由评测（(query, state) -> next）
 ```
 
 ## 使用方式
@@ -304,8 +305,9 @@ Dense          BM25
 | `make eval` | Dense baseline 与完整检索管线对比 | 已完成 |
 | `make intent-eval` | arXiv 解析、Resolve、SearchIntent | 21 条 golden |
 | `make clarify-eval` | 澄清信号和选择解析 | 24 条 golden，Graph 接入基线 |
+| `make route-eval` | Supervisor 路由 `(query, state) -> next` | 17 条 golden，当前 100%；作为「是否需要 TaskSpec」的判据 |
 
-评测集规模较小，主要用于防止重构回归。生产化前需要替换为更多真实查询、真实论文库和人工标注。
+评测集规模较小，主要用于防止重构回归。生产化前需要替换为更多真实查询、真实论文库和人工标注。**关于下一步**：`route-eval` 当前 17/17，说明 Supervisor 路由尚无明显问题，因此暂不引入 TaskSpec——真实使用中出现稳定的错误路由样本、补进 route-eval 并复现后，再设计最小 `TaskSpec(intent, query)`，年份/作者过滤仍归 RetrievalPlan、标题/主题仍归 SearchIntent，避免再造一个承担所有语义的大对象。
 
 ## Clarify 主动澄清
 
