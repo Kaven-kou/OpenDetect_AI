@@ -1,126 +1,120 @@
-# OpenDetect_AI — 智能学术文献研究助手
+# OpenDetect_AI
 
-一个面向 AI 领域研究者的智能文献管理与问答系统，基于 **LangGraph 多智能体工作流**驱动，集成 **MCP 协议**、**RAG 检索增强生成**、**短期 + 长期记忆机制**，将论文搜索、入库、问答、综述生成串联成一套完整的研究辅助流水线。
+OpenDetect_AI 是一个面向 AI 研究者的文献检索与问答系统。它使用 LangGraph 组织论文搜索、PDF 入库、RAG 问答和综述生成，并通过 MCP 接入 OpenAlex 与 ArXiv。
 
----
+当前主流程可用；主动澄清（Clarify）已接入 LangGraph 控制流：指代歧义、精确标题多候选、标题与 arXiv ID 冲突、精确标题两后端皆空时，系统会先反问澄清，下一轮确定性解析用户选择。
 
-## 核心功能
+## 核心能力
 
-- **智能搜索**：理解模糊描述（如"首次提出 ViT 的论文"），自动映射到精确论文或 arxiv ID；精确查询优先走 **OpenAlex**，泛搜直接走 OpenAlex 避免 ArXiv 限流，找不到时再用 **ArXiv MCP** 补充
-- **多方式入库**：支持自动搜索入库、arxiv 链接入库、本地 PDF 手动入库三种方式，自动去重防止重复入库；付费墙论文自动识别放弃，防止重试死循环
-- **RAG 问答**：基于已入库论文回答技术问题，每条结论标注来源，支持指代词理解（"它"、"这篇"）；检索走 **Hybrid（向量 + BM25）+ Self-Query + Rerank** 三级管线，显著抑制脏库跨领域噪音（详见「检索管线」一节）
-- **综述生成**：对已入库的一批论文生成结构化综述和方法对比表，适合写 Related Work
-- **库存查询**：随时列出向量库中已入库的所有论文
-- **短期记忆**：滑动窗口保留最近 4 轮对话，注入所有 Agent 的 prompt，支持多轮追问
-- **长期记忆**：**按 `user_id` 隔离**跨会话持久化用户研究偏好（方向、话题、来源），新会话自动读取并注入 Supervisor；与 Checkpointer（会话状态）、Chroma（论文库）三类记忆分别建模
-- **事实性校验（Verifier）**：RAG 生成回答后经校验节点检查论断是否有检索来源支撑，不足时附核验提示，抑制幻觉
-- **Human-in-the-Loop**：搜索到论文后、入库前用 LangGraph `interrupt` 中断，让用户勾选确认要入库的论文，再 `resume` 继续（既保留人类监督，又把不相关论文挡在库外）
-- **Token 级流式**：RAG / 综述的最终回答通过 `stream(stream_mode=["values","messages"])` 逐字推送，前端打字机式渲染，不再让用户干等一大段
-- **实时进度**：SSE 流式推送各 Agent 执行进度，前端可折叠"思考过程"面板
-- **检索质量评估**：内置 `make eval`，在受控基准语料上量化 baseline vs 新管线（Hit@k / MRR / Precision@k / Noise@k / 上下文相关性）
+- **论文搜索**：支持 arXiv ID、链接、明确标题和研究主题。
+- **多种入库方式**：搜索后入库、arXiv 链接入库、本地 PDF 上传。
+- **文献问答**：只基于已入库论文作答，并标注论文来源。
+- **综述生成**：基于论文库生成研究背景、方法分类、对比表和趋势总结。
+- **多轮理解**：将“好啊”“还有吗”“它呢”等输入解析为自包含查询。
+- **检索增强**：Self-Query、Dense + BM25、RRF 和 Rerank 组成完整检索管线。
+- **人工确认**：Web 流程在论文入库前暂停，让用户选择需要入库的论文。
+- **评测闭环**：提供检索、搜索意图和澄清判定三套评测。
 
----
+## 当前架构
 
-## 架构概览
-
-```
+```text
 用户输入
-    ↓
-Resolve Agent（上游查询解析：省略/指代/确认 → 自包含 resolved_query，每轮一次）
-    ↓
-Supervisor Agent（意图识别 · 动态路由 · 状态管理）
-    ↓ 条件路由（含长期记忆 + 短期上下文注入）
-┌──────────┬──────────┬──────────┬──────────┐
-│  Search  │  Ingest  │   RAG    │  Report  │
-│  Agent   │  Agent   │  Agent   │  Agent   │
-└────┬─────┴────┬─────┴────┬─────┴────┬─────┘
-     │          │          │          │
-     ▼          ▼          ▼          ▼
- OpenAlex   Chroma     DeepSeek   DeepSeek
- 优先，     向量库      LLM        LLM
- ArXiv补充
-     │          │          │          │
-     └──────┬───┘          └────┬─────┘
-            ▼                   ▼
-      回到 Supervisor           END
-            ▼（next == FINISH）
-           END → 异步提取用户偏好 → SQLite
+   |
+   v
+Resolve                 每轮只执行一次
+   |                    生成 resolved_query，维护 pending_action
+   |                    指代有多个可指对象 --> Clarify --> END
+   v
+Supervisor              结构化路由
+   |
+   +----------+-----------+----------+
+   |          |           |          |
+   v          v           v          v
+ Search     Ingest       RAG       Report
+   |          |           |          |
+OpenAlex   PDF/Chroma  Retriever   Retriever
+ArXiv MCP    |           |          |
+   |          |           v          v
+   |          |        Verifier     END
+   |          |           |
+   |          +-> Supervisor v
+   |                        END
+   +-- 多候选/标题冲突/两后端皆空 --> Clarify --> END
+   +-- 有待入库论文 --> Ingest
+   +-- 否则 --> Supervisor
 ```
 
-> 每轮先经 **Resolve** 做上游查询解析（只在入口执行一次，子 Agent 回流只到 Supervisor）：把"好啊""还有吗""它呢"等省略/指代/确认式输入解析成自包含的 `resolved_query`，下游统一用 `effective_query()` 读取，不覆写原始 `user_query`。普通问题 0 次 LLM 直接透传，确认词走确定性规则，只有真正的指代/追问才花 1 次改写。
-> Web 会话下，Ingest 前会插入 **Human-in-the-Loop** 确认关卡（`interrupt` → 用户勾选 → `resume`）；RAG 回答经 **Verifier** 校验事实性后结束，最终答案 **token 级流式**推送。Search 有结果时**直连 Ingest**（确定性边界，省一次 Supervisor LLM）。
+确定性状态转移由代码控制。例如 Search 找到待入库论文后直接进入 Ingest；只有需要理解自然语言意图时才调用 LLM。Web 会话在 Ingest 前通过 `interrupt` 暂停，并由 `/api/chat/resume` 恢复。**Clarify 是普通对话轮**（非 `interrupt`）：反问后收束到 END，下一轮 Resolve 用确定性规则解析用户的选择（序号/标题/arXiv ID/放弃/新任务），最多连续澄清两次后给可操作兜底。
 
----
+### 语义理解边界
+
+系统没有把所有判断都塞进一个 Prompt：
+
+1. Resolve 在入口处理省略、指代和上一轮待确认动作。
+2. 用户明确提供的 arXiv ID 或 URL 由正则解析，不进入 LLM。
+3. SearchIntent 只判断 `exact_title` 或 `topic`，并生成后端查询串。
+4. arXiv ID 的真实性由 OpenAlex/ArXiv 返回结果确认，不让模型凭记忆生成。
+5. 下游统一读取 `effective_query(state)`，保留原始 `user_query` 便于回溯。
 
 ## 技术栈
 
-| 模块 | 技术选型 |
+| 模块 | 实现 |
 |---|---|
-| 多智能体工作流 | LangGraph（StateGraph + Supervisor 模式 + search→ingest 确定性边界） |
-| 路由决策 | LLM `with_structured_output`（函数调用，Pydantic 约束，杜绝手撕 JSON） |
-| 事实性校验 | Verifier 节点（rag→verify→END），检索来源支撑校验 + 不足降级 |
-| 链调用 / Prompt 管理 | LangChain（prompt 静态前缀 / 动态后缀，前缀缓存友好） |
-| 外部工具调用 | MCP 协议 + langchain-mcp-adapters |
-| MCP Server | 本地 OpenAlex MCP（FastMCP stdio）+ 远程 ArXiv MCP（ModelScope streamable HTTP，精确查询补充） |
-| RAG 存储与召回 | Chroma 向量库 + BM25（rank_bm25）稀疏检索 |
-| 检索管线 | Self-Query（结构化过滤）→ Hybrid(dense+BM25) + RRF 融合 → Rerank（LLM / DashScope gte-rerank）+ 噪音闸门 |
-| 检索评估 | 自建 LLM-as-judge + 检索指标（Hit@k / MRR / Precision@k / Noise@k），`make eval` |
-| Embeddings | 阿里云 DashScope text-embedding-v4 |
-| LLM | DeepSeek（兼容 OpenAI 接口） |
+| 工作流 | LangGraph `StateGraph` + SQLite Checkpointer |
+| LLM 编排 | LangChain + OpenAI 兼容接口 |
+| 结构化输出 | Pydantic + `with_structured_output(function_calling)` |
+| 搜索工具 | 本地 OpenAlex MCP + 远程 ArXiv MCP |
+| 向量库 | Chroma |
+| Embedding | DashScope `text-embedding-v4` |
+| 稀疏检索 | BM25 |
 | PDF 解析 | PyMuPDF |
-| 短期记忆 | 滑动窗口（最近 4 轮），注入 Supervisor / RAG / Search / Report |
-| 长期记忆 | SQLite user_profile 表（按 `user_id` 隔离），跨会话持久化用户研究偏好 |
-| 人机协作 | LangGraph `interrupt` / `Command(resume)` —— 入库前人工确认关卡 |
-| 流式输出 | LangGraph `stream(["values","messages"])` —— 节点进度 + 最终答案 token 双流，SSE 推送 |
-| 进度推送 | SSE（Server-Sent Events）+ 线程安全进度队列 |
-| 前端 | 单页 HTML，支持 Markdown 渲染、思考面板折叠、PDF 拖拽上传、流式打字机、入库确认卡片 |
-
----
+| API | FastAPI + SSE |
+| 前端 | 单页 HTML |
 
 ## 项目结构
 
-```
+```text
 OpenDetect_AI/
-├── api.py                        # FastAPI 后端入口，SSE 流式接口
+├── api.py
 ├── frontend/
-│   └── index.html                # 前端页面（Markdown 渲染 + 思考面板）
+│   └── index.html
 ├── src/opendetect_ai/
-│   ├── graph.py                  # LangGraph 主图，工作流入口
-│   ├── state.py                  # AgentState 共享状态定义
-│   ├── prompts.py                # 各 Agent 的 Prompt 模板
-│   ├── env_utils.py              # 环境变量加载
-│   ├── context_utils.py          # 短期记忆：滑动窗口上下文提取
-│   ├── user_memory.py            # 长期记忆：用户偏好读写与 LLM 提取
+│   ├── graph.py
+│   ├── state.py
+│   ├── prompts.py
+│   ├── context_utils.py
+│   ├── user_memory.py
 │   ├── agents/
-│   │   ├── supervisor.py         # Supervisor：结构化路由决策（with_structured_output）
-│   │   ├── search.py             # Search Agent：论文搜索 + 意图映射
-│   │   ├── ingest.py             # Ingest Agent：PDF 下载解析入库 + HITL 入库确认
-│   │   ├── rag.py                # RAG Agent：语义检索 + 问答生成（token 流式）
-│   │   ├── report.py             # Report Agent：综述与对比表生成
-│   │   └── verify.py             # Verifier：RAG 回答事实性校验 + 不足降级
+│   │   ├── resolve.py
+│   │   ├── supervisor.py
+│   │   ├── search.py
+│   │   ├── ingest.py
+│   │   ├── rag.py
+│   │   ├── report.py
+│   │   ├── verify.py
+│   │   └── clarify.py       # Clarify：澄清判定 + clarify 节点（已接入 Graph）
 │   ├── tools/
-│   │   ├── arxiv_tool.py         # OpenAlex 搜索工具（LangChain Tool）
-│   │   ├── rag_tool.py           # Chroma 向量库工具 + 语料版本管理
-│   │   ├── retriever.py          # 检索管线：Self-Query + Hybrid(RRF) + Rerank 去噪
-│   │   ├── openalex_mcp_server.py # 本地 OpenAlex MCP Server（FastMCP）
-│   │   ├── mcp_client.py         # MCP Client（带工具列表缓存）
-│   │   └── progress.py           # SSE 进度队列（线程安全）
+│   │   ├── mcp_client.py
+│   │   ├── openalex_mcp_server.py
+│   │   ├── rag_tool.py
+│   │   ├── retriever.py
+│   │   └── progress.py
 │   └── eval/
-│       └── rag_eval.py           # RAG 检索评估：baseline vs 新管线（make eval）
+│       ├── rag_eval.py
+│       ├── intent_eval.py
+│       └── clarify_eval.py
+├── tests/
 ├── data/
-│   ├── chroma_db/                # 向量库持久化目录（自动创建）
-│   └── chat_history.db           # SQLite：对话历史 + 用户长期偏好
-├── .env                          # 环境变量（不提交 Git）
-├── .env.example                  # 环境变量模板
+├── Makefile
 ├── pyproject.toml
 └── langgraph.json
 ```
 
----
-
 ## 快速开始
 
-### 1. 克隆并安装依赖
+### 1. 安装依赖
+
+项目要求 Python 3.13+ 和 `uv`。
 
 ```bash
 git clone <your-repo-url>
@@ -128,485 +122,231 @@ cd OpenDetect_AI
 uv sync
 ```
 
-> 本项目依赖已写入 `pyproject.toml`，通常只需要执行 `uv sync`。如果你修改了依赖，再用 `uv add ...`。
-
 ### 2. 配置环境变量
 
-复制模板并填入 Key（注意：`.env` 中不要写中文注释，否则 Windows 下 `langgraph dev` 可能报编码错误）：
-
-```powershell
-Copy-Item .env.example .env
+```bash
+cp .env.example .env
 ```
 
-`.env` 关键字段：
+必填配置：
 
 ```dotenv
 OPENDETECT_LLM_MODEL="deepseek-chat"
 OPENDETECT_LLM_BASE_URL="https://api.deepseek.com"
-OPENDETECT_LLM_API_KEY="your-deepseek-key"
+OPENDETECT_LLM_API_KEY="your-deepseek-api-key"
 
 OPENDETECT_EMBED_MODEL="text-embedding-v4"
 OPENDETECT_EMBED_BASE_URL="https://dashscope.aliyuncs.com/compatible-mode/v1"
-OPENDETECT_EMBED_API_KEY="your-dashscope-key"
-
-# LangSmith 追踪（可选，关闭时设为 false，无需填 API Key）
-LANGCHAIN_TRACING_V2="false"
-LANGCHAIN_PROJECT="OpenDetect_AI"
-LANGCHAIN_API_KEY="your-langsmith-key"
+OPENDETECT_EMBED_API_KEY="your-dashscope-api-key"
 
 CHROMA_PERSIST_DIR="./data/chroma_db"
-
-OPENDETECT_ARXIV_MCP_URL="https://mcp.api-inference.modelscope.net/f26e1fc45ee54a/mcp"
 ```
 
-> 检索管线（`OPENDETECT_RETRIEVAL_POOL` / `OPENDETECT_SELF_QUERY` / `OPENDETECT_RERANK_BACKEND` …）与 `OPENDETECT_HITL` 等均有合理默认值，通常无需配置；完整清单见 `.env.example`。
+检索、HITL、Verifier 和 LangSmith 开关均有默认值，完整配置见 [.env.example](.env.example)。
 
-### 3. 启动服务
-
-```powershell
-uvicorn api:app --reload --host 0.0.0.0 --port 8000
-# 浏览器打开 http://localhost:8000
-```
-
-### 4. 验证各组件
-
-```powershell
-# 验证 MCP 工具连通性
-uv run python -c @'
-from opendetect_ai.tools.mcp_client import list_mcp_tools
-print("openalex:", list_mcp_tools("openalex"))
-print("arxiv:", list_mcp_tools("arxiv"))
-'@
-
-# 验证向量库工具
-uv run python -c @'
-from opendetect_ai.tools.rag_tool import RAG_TOOLS
-print([t.name for t in RAG_TOOLS])
-'@
-
-# 验证主图能编译
-uv run python -c @'
-from opendetect_ai.graph import build_graph
-print(type(build_graph()).__name__)
-'@
-```
-
-### 5. 跑测试与检索评估
+### 3. 启动 Web 服务
 
 ```bash
-make test              # 单元测试（无需网络 / Key）
-make integration-tests # 集成测试（需 LLM Key，跑一条最短路径）
-make eval              # RAG 检索评估：baseline vs 新管线（受控基准语料）
+uv run uvicorn api:app --reload --host 0.0.0.0 --port 8000
 ```
 
----
+浏览器打开 `http://localhost:8000`。
 
-## 运行指令
+### 4. 运行测试和评测
 
-以下命令默认在项目根目录执行。
+```bash
+make test               # 单元测试，不访问外部服务
+make integration-tests  # 最短集成链路，需要模型配置
+make lint               # Ruff
+make eval               # RAG 检索评测
+make intent-eval        # Resolve -> SearchIntent 在线评测
+make clarify-eval       # Clarify 判定评测，尚不代表已接入 Graph
+```
 
-### 1. 搜索并自动入库
+## 使用方式
 
-系统会先搜索论文，再下载 PDF、解析、分块并写入 Chroma。已存在的论文会自动跳过。付费墙论文（无 arxiv_id）自动放弃，不会死循环重试。
+### Web
 
-```powershell
-# 精确搜索：著名论文 / 明确标题 / arxiv ID，返回 1 条
-uv run python -c @'
+Web 页面支持：
+
+- SSE 流式对话和执行进度；
+- RAG/Report token 级输出；
+- 搜索结果入库前勾选确认；
+- 本地 PDF 拖拽上传；
+- 多轮会话和历史线程。
+
+### Python
+
+单轮调用：
+
+```python
 from opendetect_ai.graph import run
+
 run("帮我搜索首次提出 ViT 的论文")
-'@
-
-# 宽泛搜索：研究方向，返回 5 条
-uv run python -c @'
-from opendetect_ai.graph import run
-run("帮我找几篇 instance segmentation 相关论文")
-'@
-```
-
-### 2. arxiv 链接直接入库
-
-```powershell
-uv run python -c @'
-from opendetect_ai.graph import run
-run("帮我入库这篇论文 https://arxiv.org/abs/1706.03762")
-'@
-```
-
-### 3. 本地 PDF 手动入库
-
-```powershell
-uv run python -c @'
-from opendetect_ai.tools.rag_tool import ingest_local_pdf
-
-r = ingest_local_pdf.invoke({
-    "file_path": "F:/papers/2303.13076v1.pdf",
-    "title": "CORA: Adapting CLIP for Open-Vocabulary Detection",
-    "authors": "Yuzhong Ma et al.",
-    "published": "2023-03-23",
-})
-print(r)  # {"status": "ok", "chunks": 113}
-'@
-```
-
-### 4. 查询已入库论文
-
-```powershell
-uv run python -c @'
-from opendetect_ai.tools.rag_tool import list_ingested_papers
-
-papers = list_ingested_papers.invoke({})
-if papers and "message" in papers[0]:
-    print("向量库为空")
-else:
-    print(f"已入库论文共 {len(papers)} 篇：\n")
-    for i, p in enumerate(papers, 1):
-        arxiv = p.get("arxiv_id") or "无"
-        print("{}. {}".format(i, p.get("title")))
-        print("   发表: {}  arxiv: {}\n".format(p.get("published"), arxiv))
-'@
-```
-
-### 5. RAG 技术问答
-
-```powershell
-uv run python -c @'
-from opendetect_ai.graph import run
 run("Swin Transformer 相比 ViT 做了哪些改进？")
-'@
-```
-
-### 6. 生成综述报告
-
-```powershell
-uv run python -c @'
-from opendetect_ai.graph import run
 run("帮我生成一份已有论文的综述报告")
-'@
 ```
 
-### 7. 多轮对话（支持指代词追问）
+多轮调用：
 
-同一个 `thread_id` 会复用 LangGraph Checkpointer 保存的会话状态，短期记忆（最近 4 轮）自动注入：
-
-```powershell
-uv run python -c @'
+```python
 from opendetect_ai.graph import chat
 
-chat("帮我搜索 Swin Transformer 的论文", thread_id="demo_session")
-chat("它相比 ViT 做了哪些改进？", thread_id="demo_session")   # "它" 自动理解为 Swin Transformer
-chat("在目标检测任务上表现如何？", thread_id="demo_session")
-'@
+chat("讲讲 LoRA", thread_id="demo", user_id="user-1")
+chat("好啊", thread_id="demo", user_id="user-1")
+chat("还有吗", thread_id="demo", user_id="user-1")
 ```
 
-### 8. 查看 / 清除长期记忆
+相同 `thread_id` 复用会话 checkpoint；`user_id` 用于隔离跨会话用户偏好。
 
-```powershell
-# 查看跨会话用户偏好（HTTP API）
-curl http://localhost:8000/api/user-profile
+本地 PDF 入库：
 
-# 清除长期记忆（重置画像）
-curl -X DELETE http://localhost:8000/api/user-profile
+```python
+from opendetect_ai.tools.rag_tool import ingest_local_pdf
+
+result = ingest_local_pdf.invoke({
+    "file_path": "papers/example.pdf",
+    "title": "Example Paper",
+    "authors": "A. Researcher et al.",
+    "published": "2026-01-01",
+})
+print(result)
 ```
 
-或直接用 Python：
+## Agent 职责
 
-```powershell
-uv run python -c @'
-from opendetect_ai.user_memory import load_user_profile
-print(load_user_profile())
-'@
+### Resolve
+
+Resolve 是每轮入口，只运行一次：
+
+- 普通自包含问题直接透传，不调用 LLM；
+- 有 `pending_action` 时，用确定性规则处理确认或拒绝；
+- 只有含指代或省略标记的输入才调用一次 LLM 改写；
+- 将本轮用户输入记录为 `HumanMessage`；
+- 输出 `resolved_query`，不覆盖原始输入。
+
+### Supervisor
+
+Supervisor 结合当前状态、短期上下文和用户偏好输出结构化 `RouteDecision`。`next` 受 Literal 白名单约束，只能进入 `search`、`ingest`、`rag`、`report` 或 `FINISH`。
+
+产品策略是“答案有出处”：知识问题进入 RAG；文献不足时明确说明并提出搜索建议，不用模型参数知识补写答案。
+
+### Search
+
+Search 分三步：
+
+1. 正则识别用户明确提供的现代/旧式 arXiv ID 和 URL；
+2. `SearchIntent` 判断精确标题或主题搜索；
+3. 将解析结果直接传给 OpenAlex，必要时用 ArXiv MCP 补充。
+
+精确查询从 OpenAlex 取候选池（`search_papers` 五篇，成功空结果时再问 ArXiv），主题查询默认返回五篇。精确标题若有多个接近候选、或两后端都成功返回空、或与用户明确给的 arXiv ID 冲突，会转 Clarify 反问而不是猜一篇。
+
+### Ingest
+
+Ingest 下载并解析 PDF，按块生成 embedding 后写入 Chroma。主要保护包括：
+
+- Web 入库前 HITL 确认；
+- 确定性 chunk ID，重复写入幂等；
+- 入库后使 BM25 缓存失效；
+- 无 arXiv ID 的不可下载论文不反复重试；
+- 可重试论文有次数上限。
+
+### RAG、Report 和 Verifier
+
+RAG 召回 top-k 论文片段并生成带来源的回答；Report 使用更多上下文生成结构化综述。RAG 回答随后进入 Verifier：无检索内容时直接附提示，有检索内容时检查论断是否得到来源支撑。
+
+Verifier 采用 fail-open 策略，校验失败不会阻塞主回答。开关为 `OPENDETECT_VERIFY`。
+
+## RAG 检索管线
+
+```text
+自然语言问题
+   |
+   v
+Self-Query                 语义查询 + 年份/作者/标题过滤
+   |
+   +------------+
+   |            |
+   v            v
+Dense          BM25
+   |            |
+   +-----RRF----+
+         |
+         v
+元数据过滤 -> Rerank/噪音过滤 -> top-k
 ```
 
-### 9. 查看历史会话 ID
+- **Self-Query**：将显式约束抽成结构化字段，避免约束词污染语义查询。
+- **Hybrid**：Dense 负责语义召回，BM25 补充缩写、论文名和专有词匹配。
+- **RRF**：按倒数排名融合，不要求两种检索分数同尺度。
+- **Rerank**：支持 LLM listwise、DashScope `gte-rerank` 或关闭重排。
+- **降级策略**：任一增强环节失败时退化为更简单的检索路径。
 
-```powershell
-uv run python -c @'
-from opendetect_ai.graph import list_threads
-print(list_threads())
-'@
-```
+受控合成评测通过 `make eval` 运行。当前结果表明新管线显著提高 Precision、降低跨领域噪音，但会增加两次 LLM 调用并带来秒级延迟。该结果只代表仓库内的小型基准，不等同于生产效果。
 
-### 10. LangGraph 可视化调试
+## 状态与记忆
 
-```powershell
-uv run langgraph dev
-```
-
-启动后在浏览器中打开 LangGraph Studio 页面，选择 `agent` 图进行调试。
-
----
-
-## 常见问题
-
-### Windows 终端中文输出乱码
-
-```powershell
-$env:PYTHONIOENCODING="utf-8"
-```
-
-### LangSmith 连接失败导致启动报错
-
-将 `.env` 中的追踪关闭即可，`LANGSMITH_API_KEY` 不再是必填项：
-
-```dotenv
-LANGCHAIN_TRACING_V2="false"
-```
-
-### `uv` 缓存目录异常
-
-```powershell
-$env:UV_CACHE_DIR="$PWD\.uv-cache"
-uv run python -c @'
-print("uv cache ok")
-'@
-```
-
-### OpenAlex 搜索结果相关性差
-
-OpenAlex 覆盖广但对 AI 细分方向的关键词匹配不如 ArXiv 精准。遇到"instance segmentation 但搜到混凝土检测"之类的问题，建议换更具体的英文关键词，或直接提供 arxiv ID / 论文标题。
-
-### PaperMeta 反序列化警告
-
-```
-Deserializing unregistered type opendetect_ai.state.PaperMeta
-```
-
-这是 LangGraph checkpoint 的兼容性提示，不影响功能。如需消除，在 `.env` 中添加：
-
-```dotenv
-LANGGRAPH_STRICT_MSGPACK=false
-```
-
----
-
-## 子 Agent 详解
-
-### Supervisor Agent
-工作流调度中枢。每轮执行时：
-1. 读取**长期记忆**（用户跨会话研究偏好）
-2. 读取**短期记忆**（最近 4 轮对话上下文）
-3. 结合当前状态（搜索数、待入库数、是否已回答等）用 LLM 决策下一步路由
-
-路由决策用 `llm.with_structured_output(RouteDecision, method="function_calling")` 约束为 Pydantic 结构（`next` 字段是 `Literal` 白名单），从根上杜绝手撕 ```json``` 的脆弱解析；DeepSeek 偶发不支持工具调用时自动回退到 JSON 解析，双保险。
-
-**路由理念（文献研究助手，答案有出处）**：
-- 打招呼 / 问身份 / 问能力 → 自我介绍模板；
-- 任何知识 / 技术 / 概念问题（"XX 是什么"、"XX 与 YY 的区别"）→ **一律走 RAG**，由文献支撑作答；库里没有相关论文时，RAG 会**如实说明并主动提议去搜索入库**，而不是用模型自身知识编造（严格"答案有出处"）；
-- 只有库还空着时，才由 Supervisor 直接提示"暂无相关论文，要我去搜一批吗？"。
-
-**承接上一轮提议（pending_action）**：Supervisor / RAG 在提议"要我去搜索入库吗？"时，会把一条待确认动作 `pending_action = {"kind":"search","query": ...}` 写入状态。下一轮用户回"好啊"，由**上游 Resolve 节点确定性地**承接（见下）——Supervisor 自己**不再做 query 改写、不再输出 `rewritten_query`**，指代/确认统一收在上游一处。
-
-内置防死循环机制：`search_attempted` 确保搜索失败时不再重试；`rag_answer` / `final_report` 生成后直接收束到 FINISH；入库失败超过 2 次的论文永久放弃。
-
-### Resolve Agent（上游查询解析）
-每轮对话的入口节点（`START → resolve → supervisor`，只执行一次），把省略/指代/确认式输入解析成**自包含**的 `resolved_query`，让下游只面对干净问题。**只新增字段、不覆写 `user_query`**，下游统一用 `effective_query()` 读取，便于日志/评测/后续迁移 TaskSpec。两道**确定性闸门**把成本压住，独立节点不会退化成"每条消息固定多一次 LLM 调用"：
-1. **确认/拒绝**（有 `pending_action` 时）：`好啊/可以/嗯` 等用词表 + 贪心匹配判定，**0 次 LLM**，承接为一次显式搜索并清空 pending；`不用了/算了` → 清空；夹带新任务 → 清空后按普通输入走。
-2. **是否需要改写**：含 `还有吗/它/这个/更多` 等指代标记才借上下文改写（**1 次 LLM**）；普通自包含问题**0 次**直接透传。
-
-> 顺带修了一个潜藏 bug：此前全流程只往 `messages` 追加 AIMessage、从不记录用户的 HumanMessage，`build_context_str` 恒为空——"短期记忆/指代消解"其实从未真正生效。Resolve 记录每轮 HumanMessage 后，短期上下文才真正可用。
-> 语义链评测：`make intent-eval` 跑 `resolve → SearchIntent` 全链路 golden set（21 条），当前 21/21，且 resolve 改写 LLM 调用恰为指代类用例数（自包含/确认类为 0），把"职责更清晰但成本回退"这条红线焊死。
-
-### Search Agent
-把语义理解拆成「确定性解析 + LLM 结构化判断 + 真正使用解析结果」三段，让规则做规则擅长的、LLM 只做非它不可的判断：
-1. **确定性解析(正则)**：用户明确给出的 arXiv ID / 链接直接正则识别(覆盖 `2010.11929`、`2010.11929v2`、`arxiv.org/abs|pdf/...`、旧式 `hep-th/9901001`),命中就精确检索,**不进 LLM、零幻觉**；正则只认明确给出的 ID,不从论文名推断
-2. **LLM 结构化判断**：没给 ID 时,才用 `with_structured_output(SearchIntent)` 判断这**唯一需要判断的事**——`exact_title`(点名某篇论文,填规范英文标题) vs `topic`(找某方向,填英文关键词短语)。输入已是上游 Resolve 出的**自包含 query**,所以分类器**不再读对话历史做指代消解**（指代已在上游解决），只做标题/话题这一件判断。**不让模型回忆 arxiv ID**——ID 的事实来源是搜索后端(OpenAlex/arXiv),不是模型参数记忆(治 arxiv ID 幻觉)
-3. **真正使用解析结果**：泛搜传给 OpenAlex 的就是 `intent.query`(已含上下文/指代消解),不再拿原始输入重抽一遍(修复了 keyword 分支丢弃解析结果的 bug);精确查询走 OpenAlex 精确接口,找不到再用 ArXiv MCP 补充。精确返回 1 条、泛搜 5 条
-
-> 相比"一个大 prompt 枚举情况A~F"的旧写法,能出错的面小一个量级:确定性的事交给正则、易幻觉的 ID 交给后端校验、`SearchIntent` 的 `Literal` 白名单杜绝手撕 JSON。arXiv 解析有全格式单测,泛搜"用的是 intent.query 而非原始输入"有回归单测锁死。
-
-### Ingest Agent
-- **HITL 入库确认**：Web 会话下，搜索到论文后先用 `interrupt` 中断，把论文列表抛给前端让用户勾选；`resume` 返回选择后，仅入库勾选的论文，未选中的标记为已处理（避免重试）
-- 网络论文：Search Agent 元数据 → 下载 PDF → PyMuPDF 解析 → 递归字符分块（`chunk_size=800`）→ **并行 embedding**（线程池并发多批，实测 ≈4.6×）→ 存入 Chroma
-- 本地 PDF：直接读取本地路径 → 解析 → 入库（用户主动上传，无需确认）
-- 去重：确定性 chunk ID（`arxiv_id__chunk_N`）幂等写入；写入后 `bump_corpus_version()` 使 BM25 索引缓存失效
-- 重试保护：无 arxiv_id 的付费墙论文直接放弃；有 arxiv_id 的论文最多重试 2 次
-
-### RAG Agent
-用户问题 → **检索管线**（Self-Query → Hybrid(dense+BM25)+RRF → Rerank 去噪，见下节）召回 top-5 段落 → 注入对话上下文（理解指代词）→ DeepSeek 生成带引用的回答，答案 token 打上 `final_answer` 标签逐字流式推送。**严格"答案有出处"**：只依据检索片段作答，检索不到相关内容时不编造，而是明确告知"库里还没有能回答的论文，要我去搜索入库吗？"。
-
-### Report Agent
-检索管线召回 top-8 段落 + 已入库论文列表 + 对话上下文 → 生成包含背景、方法分类、对比表、趋势分析的结构化综述（同样 token 流式）。
-
----
-
-## 检索管线（RAG 升级）
-
-朴素 `similarity_search(k=5)` 在「脏库」上会捞出大量跨领域噪音（例如问 CLIP 却召回医学 PMC-CLIP）。本项目在向量检索之上叠加三层能力：
-
-```
-用户问题
-    │
-    ▼  ① Self-Query：LLM 结构化抽取「语义 query + 年份/作者/标题过滤条件」
-┌───────────────┬───────────────┐
-▼               ▼
-Dense(向量)     BM25(关键词)          ② Hybrid：稠密召专有名词/缩写弱，稀疏补精确匹配
-└──────┬────────┘
-       ▼  RRF 融合（Reciprocal Rank Fusion，1/(60+rank) 累加）
-  候选池(pool=30)
-       ▼  元数据后置过滤（年份/作者/标题，在 Python 端做，不依赖 Chroma filter 方言）
-       ▼  ③ Rerank + 噪音闸门：交叉相关性重排，丢弃跨领域段落
-    top-k 结果
-```
-
-- **Self-Query**：用 `with_structured_output` 把"2023年后的 XX 论文"解析成 `year_min=2023` + 纯语义 query，避免约束词污染向量检索。
-- **Hybrid + RRF**：Dense（DashScope embedding）+ BM25（rank_bm25）各召回一批，用 RRF 融合。BM25 索引随语料版本缓存，入库后自动重建。
-- **Rerank + 噪音闸门**：默认 **LLM listwise 重排**（复用 DeepSeek，零额外依赖，prompt 显式指令"跨领域段落一律排除"）；可切 DashScope `gte-rerank`（复用 embedding Key，带相关性阈值 `OPENDETECT_RERANK_MIN_SCORE`）。任一环节失败都优雅退化，不会让检索崩。
-
-**评估结果**（`make eval`，受控合成基准：5 篇目标论文 + 4 篇跨领域噪音，12 个问题含多 gold）：
-
-| 指标 | Baseline（纯 dense） | 新管线 | 说明 |
+| 类型 | 存储 | 隔离键 | 用途 |
 |---|---|---|---|
-| Precision@5 ↑ | 0.45 | **0.98** | top-5 聚焦到正确论文的比例（核心提升）|
-| Noise@5 ↓ | 0.03 | **0.00** | top-5 里跨领域噪音占比 |
-| nDCG@5 / Hit@k / MRR | 1.00 | 1.00 | 小语料上已饱和，区分度看 Precision/Noise |
-| 上下文相关性 ↑ | 0.83 | **1.00** | LLM 判定检索内容是否足以回答 |
-| P50 / P95 延迟 | ~180 / 186 ms | ~2.6 / 2.8 s | ★成本面：新管线更慢 |
-| LLM 调用 / 次检索 | 0 | 2 | ★成本面：self-query + rerank |
+| 短期上下文 | `messages` 滑动窗口 | `thread_id` | 指代消解和多轮问答 |
+| 工作流状态 | LangGraph SQLite Checkpointer | `thread_id` | 节点状态、HITL 和跨进程恢复 |
+| 用户偏好 | SQLite `user_profile` | `user_id` | 跨会话研究兴趣 |
+| 论文知识库 | Chroma | 当前为全局库 | 文献检索 |
 
-> 说明：baseline 能召回正确论文但 top-5 里塞了一半不相关内容；新管线返回紧凑、无跨领域噪音的结果，**代价是每次检索多 2 次 LLM 调用、延迟升到秒级**——`make eval` 如实打印这一成本面。评估为自建 LLM-as-judge + 检索指标（Hit@k / MRR / Precision@k / nDCG@k / Noise@k），不依赖 RAGAS 等重依赖；`--no-judge` 可跳过 LLM 判分更快跑。这是**受控合成基准**（可复现），生产中应替换为几十~上百条真实标注问题。
+`pending_action` 保存系统等待用户确认的动作。当前主流程使用 `kind: "search"`；Clarify 设计复用同一字段的 `kind: "clarification"`，避免维护两份悬挂状态。
 
----
+## 评测
 
-## Human-in-the-Loop（入库确认）
-
-Web 会话下，工作流在 **search 出结果、ingest 入库前**插入人工确认关卡：
-
-```
-search 找到论文 → ingest 节点 interrupt(论文列表) ──暂停──▶ 前端渲染勾选卡片
-                                                              │ 用户勾选
-        继续入库选中的论文 ◀──resume(选中序号)── /api/chat/resume
-```
-
-- 用 LangGraph `interrupt()` 抛出待确认论文，SSE 推 `type:"interrupt"` 事件；前端渲染带复选框的确认卡片。
-- 用户确认后 `POST /api/chat/resume`，后端 `Command(resume=选中序号)` 从中断点继续；未选中的论文标记为已处理，不再重试。
-- 状态用 checkpointer（SQLite）持久化，中断可跨请求恢复。开关：`OPENDETECT_HITL`（CLI 的 `run()` / `chat()` 不触发，仅 Web 生效）。
-
-这一关同时缓解了脏库问题——用户可以把搜错的、跨领域的论文直接挡在库外。
-
----
-
-## 记忆机制说明
-
-三种"记忆"分别建模，概念清晰、互不混淆：
-
-| 类型 | 实现 | 范围键 | 内容 |
-|---|---|---|---|
-| 短期记忆（上下文）| 滑动窗口（4 轮；Supervisor 用 2 轮）| 会话内 | 最近对话问答对，理解指代词和追问 |
-| 会话状态持久化 | LangGraph SqliteSaver（Checkpointer）| `thread_id` | 完整工作流状态 + messages，多轮连贯、中断可恢复 |
-| 长期用户偏好 | SQLite user_profile 表 | `user_id` | 研究方向、常搜话题、关注来源（**按用户隔离**）|
-| 论文知识库 | Chroma 向量库 | 全局 | 已入库论文全文 embedding |
-
-> 注意区分：Checkpointer 存的是「会话状态」（按 thread_id），user_profile 才是「跨会话的长期用户偏好」（按 user_id）——两者常被混为一谈，面试时要说清。
-
-每次对话结束后，系统在后台线程按 `user_id` 异步提取本轮研究偏好并合并到 `user_profile`，不阻塞响应。`user_id` 由前端在 localStorage 生成并随请求传入，多用户互不串画像。
-
----
-
-## Verifier 事实性校验
-
-RAG 生成回答后，工作流经一个 `verify` 节点（`rag → verify → END`）做事实性把关，抑制"检索没支撑却硬答"的幻觉：
-
-- 无检索内容却生成了回答 → 直接附「缺乏来源」提示（不花 LLM）。
-- 有检索内容 → 用 `with_structured_output` 让 LLM 判回答是否 grounded、列出无支撑论断；不通过则给回答**附核验提示**（不删改已流式给用户的正文）。
-- fail-open：校验器任一步失败都放行，不成为可用性瓶颈。开关 `OPENDETECT_VERIFY`。
-
----
-
-## 入库方式对比
-
-| 方式 | 触发方法 | 适用场景 |
+| 命令 | 目标 | 状态 |
 |---|---|---|
-| 自动搜索入库 | `run("帮我搜索 ViT 论文")` | 在线检索 + 自动下载 |
-| arxiv 链接入库 | `run("帮我入库 https://arxiv.org/abs/xxxx")` | 已知具体论文链接 |
-| 本地 PDF 入库 | `ingest_local_pdf.invoke({...})` 或前端拖拽 | 已下载到本地的 PDF |
+| `make test` | 确定性逻辑和节点单元测试 | 已接入 CI 式本地检查 |
+| `make integration-tests` | 最短在线链路 | 需要模型和外部服务 |
+| `make eval` | Dense baseline 与完整检索管线对比 | 已完成 |
+| `make intent-eval` | arXiv 解析、Resolve、SearchIntent | 21 条 golden |
+| `make clarify-eval` | 澄清信号和选择解析 | 24 条 golden，Graph 接入基线 |
 
----
+评测集规模较小，主要用于防止重构回归。生产化前需要替换为更多真实查询、真实论文库和人工标注。
 
-## MCP 集成说明
+## Clarify 主动澄清
 
-本项目接入两个 MCP Server：
+`clarify.py` 的判定与选择解析已注册为 `clarify` 图节点，并接入 Resolve/Search 的条件边。当前覆盖：
 
-- **本地 OpenAlex MCP**：项目内置的 `tools/openalex_mcp_server.py`，基于 FastMCP，stdio 传输。**主要搜索后端**，稳定无限流，覆盖绝大多数 arxiv 论文
-- **远程 ArXiv MCP**：ModelScope streamable HTTP 部署，地址来自 `OPENDETECT_ARXIV_MCP_URL`。仅在 OpenAlex 精确查询找不到时作为补充
+- `ambiguous_reference`：上下文中存在多个**可 grounding**（`evidence + message_index` 可核对）的指代对象；
+- `multiple_papers`：候选池去重后多个标题同时达到**绝对下限**且分差很小（`top1,top2 ≥ FLOOR ∧ top1−top2 ≤ GAP`）；
+- `entity_conflict`：用户给出的标题与明确 arXiv ID 返回标题冲突；
+- `exact_title_not_found`：两个后端都**成功返回空**结果（后端报错 ≠ 没找到）。
 
-远程 ArXiv MCP 配置：
+触发后 `clarify` 节点把带序号的问题作为本轮答案返回并收束到 END；下一轮 Resolve 以确定性规则解析回复（序号/标题/arXiv ID → 选中；放弃 → 清空；新任务 → 转处理；越界不默认第一项），`attempts` 最多连续澄清两次后给可操作兜底。`low_relevance` 暂缓——检索层还没有统一输出可比较的重排分数，不临时拍阈值。判定逻辑有 24 条 golden（`make clarify-eval`）持续回归。
 
-```json
-{
-  "mcpServers": {
-    "arxiv-mcp-server": {
-      "type": "streamable_http",
-      "url": "https://mcp.api-inference.modelscope.net/f26e1fc45ee54a/mcp"
-    }
-  }
-}
-```
+## API
 
-本地 OpenAlex MCP 暴露三个工具：
-
-| 工具 | 功能 |
-|---|---|
-| `search_papers` | 关键词搜索，返回多篇论文 |
-| `get_paper_by_id` | 按 arxiv ID 精确获取单篇（6 种方式逐一尝试） |
-| `get_paper_by_title` | 按标题搜索最匹配的一篇 |
-
-MCP 客户端带**工具列表缓存**，首次连接后复用，不重复建立进程，降低调用开销。
-
----
-
-## API 端点
-
-| 端点 | 方法 | 说明 |
+| 方法 | 路径 | 说明 |
 |---|---|---|
-| `/api/chat/stream` | POST | SSE 流式对话（主接口，含进度 / token / 中断事件） |
-| `/api/chat/resume` | POST | HITL 恢复：提交入库确认选择后继续流式 |
-| `/api/chat` | POST | 非流式对话 |
-| `/api/papers` | GET | 列出已入库论文 |
-| `/api/threads` | GET | 列出历史会话 ID |
-| `/api/upload-pdf` | POST | 上传本地 PDF 入库 |
-| `/api/user-profile` | GET | 查看用户长期偏好 |
-| `/api/user-profile` | DELETE | 清除用户长期偏好 |
+| POST | `/api/chat` | 非流式对话 |
+| POST | `/api/chat/stream` | SSE 流式对话 |
+| POST | `/api/chat/resume` | 恢复 HITL 入库流程 |
+| GET | `/api/threads` | 历史会话 ID |
+| GET | `/api/papers` | 已入库论文 |
+| POST | `/api/upload-pdf` | 上传本地 PDF |
+| GET | `/api/user-profile` | 读取用户偏好 |
+| DELETE | `/api/user-profile` | 清除用户偏好 |
 
----
+## 已知限制
 
-## 参考文档
+- Chroma 论文库当前是全局共享的，没有按用户隔离。
+- SQLite Checkpointer 适合本地开发，不适合作为高并发生产存储。
+- `PaperMeta` 作为自定义类型写入旧 checkpoint 时会触发 LangGraph forward-compat 警告；后续应改存普通 dict 或显式注册类型。
+- Clarify 已接入图，但尚未做「跨进程重启」级别的端到端验收（已有单测 + 真实模型 smoke 覆盖判定与路由）。
+- RAG 和意图评测仍是小型受控数据集。
+- PDF 下载速度受 arXiv 限流和来源站点影响。
 
-- LangGraph 文档：https://langchain-ai.github.io/langgraph/
-- LangChain 文档：https://docs.langchain.com
-- MCP 协议规范：https://modelcontextprotocol.io
-- OpenAlex API：https://docs.openalex.org
+## 后续计划
 
----
+- 为 Clarify 补「跨进程重启」端到端验收（复用 pending_action 持久化，与主流程一致）；
+- 为检索结果保留统一相关性分数，再评估 `low_relevance` 澄清；
+- 将 `PaperMeta` checkpoint 数据迁移为稳定的可序列化结构；
+- 扩充真实标注意图和检索评测集；
+- 异步化节点与 MCP 调用；
+- 生产环境改用持久化服务和更严格的安全策略。
 
-## 已完成 / 后续计划
-
-**已完成**
-- [x] arxiv 链接直接入库
-- [x] 本地 PDF 手动入库（前端拖拽 + API）
-- [x] 查询已入库论文列表
-- [x] LangGraph Checkpointer 支持多轮对话历史
-- [x] 短期记忆：滑动窗口上下文注入（4轮）
-- [x] 长期记忆：跨会话用户研究偏好持久化
-- [x] SSE 实时进度推送 + 前端思考面板
-- [x] OpenAlex 优先搜索策略（规避 ArXiv 限流）
-- [x] 付费墙论文识别，防止重试死循环
-- [x] MCP 工具列表缓存，降低连接开销
-- [x] FastAPI Web 服务 + 单页前端
-- [x] **检索管线升级**：Hybrid(dense+BM25)+RRF + Self-Query + Rerank 去噪
-- [x] **RAG 检索评估**：`make eval`，baseline vs 新管线量化对比
-- [x] **Human-in-the-Loop**：入库前 `interrupt`/`resume` 人工确认
-- [x] **Token 级流式输出**：最终答案逐字打字机渲染
-- [x] **Supervisor 结构化路由**：`with_structured_output` 替代手撕 JSON
-- [x] **确定性边界**：search 有结果直连 ingest，省一次 Supervisor LLM
-- [x] **Verifier 事实性校验**：RAG 回答检索来源支撑校验 + 不足降级
-- [x] **上下文工程**：prompt 静态前缀 / 动态后缀（前缀缓存友好）+ 按 Agent 裁剪窗口
-- [x] **用户级长期记忆**：user_profile 按 `user_id` 隔离（含旧表平滑迁移）
-- [x] **RAG 检索评估**：`make eval`，Precision@k / nDCG@k / Noise@k + P50/P95 延迟 / LLM 调用成本
-- [x] 真实单元 + 集成测试（替换模板残留用例，含入库失败重试、用户隔离、检索纯函数）
-
-**后续计划**
-- [ ] 异步化工作流（节点 `ainvoke` + MCP 全异步），提升并发
-- [ ] 长期记忆升级为 LangGraph `BaseStore` + 语义召回
-- [ ] 交叉编码器（bge-reranker）本地重排后端
-- [ ] 评估集扩充到几十~上百条真实标注问题（当前为受控合成基准）
-- [ ] 安全边界：PDF 大小/域名白名单、CORS 收敛、生产用 Postgres Checkpointer
+架构决策、故障案例和面试讲法见 [面试.md](面试.md)。
