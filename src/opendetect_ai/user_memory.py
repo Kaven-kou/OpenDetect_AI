@@ -26,10 +26,20 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime
+import threading
+from datetime import datetime, timezone
 
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage
+
+
+_profile_locks: dict[str, threading.Lock] = {}
+_profile_locks_guard = threading.Lock()
+
+
+def _profile_lock(user_id: str) -> threading.Lock:
+    with _profile_locks_guard:
+        return _profile_locks.setdefault(user_id, threading.Lock())
 
 
 # ── 存储路径与表结构 ────────────────────────────────────────────
@@ -45,6 +55,7 @@ def _create_table(conn: sqlite3.Connection) -> None:
             user_id    TEXT NOT NULL DEFAULT 'default',
             key        TEXT NOT NULL,
             value      TEXT NOT NULL,
+            source     TEXT NOT NULL DEFAULT 'conversation',
             updated_at TEXT NOT NULL,
             PRIMARY KEY (user_id, key)
         )
@@ -65,6 +76,19 @@ def _ensure_table(conn: sqlite3.Connection) -> None:
         conn.execute("DROP TABLE _user_profile_old")
     else:
         _create_table(conn)
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(user_profile)").fetchall()]
+    if "source" not in cols:
+        conn.execute(
+            "ALTER TABLE user_profile ADD COLUMN source TEXT NOT NULL DEFAULT 'conversation'"
+        )
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS memory_settings (
+            user_id    TEXT PRIMARY KEY,
+            enabled    INTEGER NOT NULL DEFAULT 1,
+            ttl_days   INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL
+        )
+    """)
     conn.commit()
 
 
@@ -77,16 +101,28 @@ def load_user_profile(user_id: str = "default") -> dict:
     try:
         conn = sqlite3.connect(_get_db_path(), check_same_thread=False)
         _ensure_table(conn)
+        settings = _get_memory_settings_conn(conn, user_id)
+        if not settings["enabled"]:
+            conn.close()
+            return {}
         rows = conn.execute(
-            "SELECT key, value FROM user_profile WHERE user_id = ?", (user_id,)
+            "SELECT key, value, updated_at FROM user_profile WHERE user_id = ?", (user_id,)
         ).fetchall()
         conn.close()
-        return {row[0]: json.loads(row[1]) for row in rows}
+        cutoff = None
+        if settings["ttl_days"] > 0:
+            cutoff = datetime.now(timezone.utc).timestamp() - settings["ttl_days"] * 86400
+        profile = {}
+        for key, value, updated_at in rows:
+            if cutoff is not None and _parse_timestamp(updated_at) < cutoff:
+                continue
+            profile[key] = json.loads(value)
+        return profile
     except Exception:
         return {}
 
 
-def save_user_profile(user_id: str, updates: dict) -> None:
+def save_user_profile(user_id: str, updates: dict, source: str = "conversation") -> None:
     """
     保存/更新指定 user_id 的画像字段。
     updates 的每个 key-value 会独立 upsert，其他字段不受影响。
@@ -94,17 +130,98 @@ def save_user_profile(user_id: str, updates: dict) -> None:
     try:
         conn = sqlite3.connect(_get_db_path(), check_same_thread=False)
         _ensure_table(conn)
-        now = datetime.utcnow().isoformat()
+        if not _get_memory_settings_conn(conn, user_id)["enabled"]:
+            conn.close()
+            return
+        now = datetime.now(timezone.utc).isoformat()
         for key, value in updates.items():
             conn.execute(
-                "INSERT INTO user_profile (user_id, key, value, updated_at) VALUES (?, ?, ?, ?)"
-                " ON CONFLICT(user_id, key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
-                (user_id, key, json.dumps(value, ensure_ascii=False), now)
+                "INSERT INTO user_profile (user_id, key, value, source, updated_at) VALUES (?, ?, ?, ?, ?)"
+                " ON CONFLICT(user_id, key) DO UPDATE SET value=excluded.value,"
+                " source=excluded.source, updated_at=excluded.updated_at",
+                (user_id, key, json.dumps(value, ensure_ascii=False), source, now)
             )
         conn.commit()
         conn.close()
     except Exception as e:
         print(f"[UserMemory] 保存失败（静默）: {e}")
+
+
+def _parse_timestamp(value: str) -> float:
+    try:
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _get_memory_settings_conn(conn: sqlite3.Connection, user_id: str) -> dict:
+    row = conn.execute(
+        "SELECT enabled, ttl_days, updated_at FROM memory_settings WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()
+    if not row:
+        return {"enabled": True, "ttl_days": 0, "updated_at": None}
+    return {"enabled": bool(row[0]), "ttl_days": max(0, row[1]), "updated_at": row[2]}
+
+
+def get_memory_settings(user_id: str = "default") -> dict:
+    try:
+        conn = sqlite3.connect(_get_db_path(), check_same_thread=False)
+        _ensure_table(conn)
+        settings = _get_memory_settings_conn(conn, user_id)
+        conn.close()
+        return settings
+    except Exception:
+        return {"enabled": True, "ttl_days": 0, "updated_at": None}
+
+
+def set_memory_settings(
+    user_id: str,
+    *,
+    enabled: bool | None = None,
+    ttl_days: int | None = None,
+) -> dict:
+    """更新用户记忆开关和 TTL；ttl_days=0 表示不过期。"""
+    conn = sqlite3.connect(_get_db_path(), check_same_thread=False)
+    _ensure_table(conn)
+    current = _get_memory_settings_conn(conn, user_id)
+    next_enabled = current["enabled"] if enabled is None else bool(enabled)
+    next_ttl = current["ttl_days"] if ttl_days is None else max(0, min(ttl_days, 3650))
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        INSERT INTO memory_settings (user_id, enabled, ttl_days, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+          enabled=excluded.enabled, ttl_days=excluded.ttl_days, updated_at=excluded.updated_at
+        """,
+        (user_id, int(next_enabled), next_ttl, now),
+    )
+    conn.commit()
+    conn.close()
+    return {"enabled": next_enabled, "ttl_days": next_ttl, "updated_at": now}
+
+
+def list_memory_entries(user_id: str = "default") -> list[dict]:
+    """列出记忆值、来源与更新时间，供用户查看数据从哪里来。"""
+    try:
+        conn = sqlite3.connect(_get_db_path(), check_same_thread=False)
+        _ensure_table(conn)
+        rows = conn.execute(
+            "SELECT key, value, source, updated_at FROM user_profile WHERE user_id = ?"
+            " ORDER BY updated_at DESC",
+            (user_id,),
+        ).fetchall()
+        conn.close()
+        return [
+            {"key": key, "value": json.loads(value), "source": source, "updated_at": updated_at}
+            for key, value, source, updated_at in rows
+        ]
+    except Exception:
+        return []
 
 
 
@@ -162,7 +279,7 @@ _EXTRACT_PROMPT = """你是一个用户偏好分析助手。
 """
 
 
-def extract_and_save_profile(
+def _extract_and_save_profile_unlocked(
     messages: list,
     llm_model: str,
     llm_base_url: str,
@@ -179,6 +296,8 @@ def extract_and_save_profile(
         user_id: 用户标识，画像按此隔离
     """
     if not messages:
+        return
+    if not get_memory_settings(user_id)["enabled"]:
         return
 
     # 只取面向用户的消息对，过滤路由日志
@@ -226,8 +345,22 @@ def extract_and_save_profile(
         # last_session_topics 每次直接覆盖
         merged["last_session_topics"] = extracted.get("last_session_topics", [])
 
-        save_user_profile(user_id, merged)
+        save_user_profile(user_id, merged, source="conversation_extract")
         print(f"[UserMemory] 已更新用户偏好: {list(merged.keys())}")
 
     except Exception as e:
         print(f"[UserMemory] 提取失败（静默）: {e}")
+
+
+def extract_and_save_profile(
+    messages: list,
+    llm_model: str,
+    llm_base_url: str,
+    llm_api_key: str,
+    user_id: str = "default",
+) -> None:
+    """同一用户串行提取，避免并发 read-modify-write 覆盖偏好。"""
+    with _profile_lock(user_id):
+        _extract_and_save_profile_unlocked(
+            messages, llm_model, llm_base_url, llm_api_key, user_id
+        )

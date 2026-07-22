@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from langgraph.graph import StateGraph, END
 import sqlite3         # ← 新增
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from langgraph.checkpoint.sqlite import SqliteSaver          # ← 新增
 
 from opendetect_ai.tools.rag_tool import list_ingested_papers
@@ -117,10 +119,10 @@ def build_graph(checkpointer=None) -> StateGraph:
     # Ingest 完成后回 supervisor，由它按用户意图决定 rag / report / FINISH
     builder.add_edge("ingest",  "supervisor")
 
-    # RAG 生成回答后经 Verifier 校验事实性再结束；Report 直接结束。
+    # 所有基于论文证据的用户输出统一经过 AnswerGuard。
     builder.add_edge("rag",     "verify")
+    builder.add_edge("report",  "verify")
     builder.add_edge("verify",  END)
-    builder.add_edge("report",  END)
 
     return builder.compile(checkpointer=checkpointer)        # ← 传入 checkpointer
 
@@ -131,6 +133,16 @@ graph = build_graph()
 # ── 多轮图（SQLite 持久化）─────────────────────────────────────
 
 _chat_graph = None   # ← 全局单例
+_chat_graph_lock = threading.Lock()
+_thread_locks: dict[str, threading.Lock] = {}
+_thread_locks_guard = threading.Lock()
+_profile_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="profile-memory")
+
+
+def get_thread_lock(thread_id: str) -> threading.Lock:
+    """同一会话串行执行，防止并发请求从同一 checkpoint 分叉。"""
+    with _thread_locks_guard:
+        return _thread_locks.setdefault(thread_id, threading.Lock())
 
 def _get_chat_graph():
     """
@@ -139,10 +151,12 @@ def _get_chat_graph():
     """
     global _chat_graph
     if _chat_graph is None:
-        os.makedirs(os.path.dirname(_DB_PATH), exist_ok=True)
-        conn = sqlite3.connect(_DB_PATH, check_same_thread=False)
-        checkpointer = SqliteSaver(conn)
-        _chat_graph = build_graph(checkpointer=checkpointer)
+        with _chat_graph_lock:
+            if _chat_graph is None:
+                os.makedirs(os.path.dirname(_DB_PATH), exist_ok=True)
+                conn = sqlite3.connect(_DB_PATH, check_same_thread=False)
+                checkpointer = SqliteSaver(conn)
+                _chat_graph = build_graph(checkpointer=checkpointer)
     return _chat_graph
 
 
@@ -195,6 +209,7 @@ def build_turn_input(chat_graph, config: dict, user_query: str, thread_id: str,
             "next":             "supervisor",
             "search_attempted": False,
             "rag_answer":       "",
+            "verification":     {},
             "final_report":     "",
             "direct_answer":    "",
             "error":            "",
@@ -215,18 +230,19 @@ def build_turn_input(chat_graph, config: dict, user_query: str, thread_id: str,
 
 
 def spawn_profile_extraction(messages: list, user_id: str = "default") -> None:
-    """对话结束后在后台线程异步提取用户长期偏好（按 user_id 隔离），失败静默、不阻塞主流程。"""
+    """提交到固定大小工作池；同一用户的合并由 user_memory 串行化。"""
     if not messages:
         return
     try:
         from opendetect_ai.user_memory import extract_and_save_profile
-        import threading
-        threading.Thread(
-            target=extract_and_save_profile,
-            args=(messages, OPENDETECT_LLM_MODEL, OPENDETECT_LLM_BASE_URL,
-                  OPENDETECT_LLM_API_KEY, user_id),
-            daemon=True,
-        ).start()
+        _profile_executor.submit(
+            extract_and_save_profile,
+            messages,
+            OPENDETECT_LLM_MODEL,
+            OPENDETECT_LLM_BASE_URL,
+            OPENDETECT_LLM_API_KEY,
+            user_id,
+        )
     except Exception:
         pass
 
@@ -251,7 +267,12 @@ def run(user_query: str) -> dict:
     return final_state
 
 
-def chat(user_query: str, thread_id: str = "default", user_id: str = "default") -> dict:
+def chat(
+    user_query: str,
+    thread_id: str = "default",
+    user_id: str = "default",
+    hitl: bool = False,
+) -> dict:
     """
     多轮对话入口。同一 thread_id 内的对话保留完整历史状态。
 
@@ -274,21 +295,32 @@ def chat(user_query: str, thread_id: str = "default", user_id: str = "default") 
         "recursion_limit": 20,
     }
 
-    # ── 构造本轮输入（新会话 / 续接会话，共享逻辑）─────────────
-    current = chat_graph.get_state(config)
-    input_state = build_turn_input(chat_graph, config, user_query, thread_id, user_id)
-    already_ingested = input_state["ingested_count"]
+    with get_thread_lock(thread_id):
+        # 构造输入和执行必须处于同一个临界区，避免两个请求读取同一父 checkpoint。
+        current = chat_graph.get_state(config)
+        input_state = build_turn_input(chat_graph, config, user_query, thread_id, user_id)
+        input_state["hitl"] = hitl
+        already_ingested = input_state["ingested_count"]
 
-    print(f"\n{'='*50}")
-    if current.values:
-        print(f"[会话 {thread_id}] 第 {len(current.values.get('messages', [])) // 2 + 1} 轮对话（向量库实时计数: {already_ingested} 篇）")
-    else:
-        print(f"[会话 {thread_id}] 新会话开始")
-    print(f"用户问题: {user_query}")
-    print(f"向量库已有论文: {already_ingested} 篇")
-    print(f"{'='*50}\n")
+        print(f"\n{'='*50}")
+        if current.values:
+            print(f"[会话 {thread_id}] 第 {len(current.values.get('messages', [])) // 2 + 1} 轮对话（向量库实时计数: {already_ingested} 篇）")
+        else:
+            print(f"[会话 {thread_id}] 新会话开始")
+        print(f"用户问题: {user_query}")
+        print(f"向量库已有论文: {already_ingested} 篇")
+        print(f"{'='*50}\n")
 
-    final_state = chat_graph.invoke(input_state, config=config)
+        final_state = chat_graph.invoke(input_state, config=config)
+        if hitl:
+            snapshot = chat_graph.get_state(config)
+            interrupts = []
+            for task in getattr(snapshot, "tasks", []) or []:
+                for item in getattr(task, "interrupts", None) or []:
+                    if isinstance(getattr(item, "value", None), dict):
+                        interrupts.append(item.value)
+            if interrupts:
+                final_state = {**final_state, "_interrupts": interrupts}
     _print_output(final_state)
 
     spawn_profile_extraction(final_state.get("messages", []), user_id)

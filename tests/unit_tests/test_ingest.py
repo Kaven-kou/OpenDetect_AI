@@ -64,3 +64,40 @@ def test_ingest_no_pending_and_no_failed_returns_done() -> None:
     out = ingest_mod.ingest_node(st)
     assert out["ingested_count"] == 0
     assert "没有待入库" in out["messages"][0].content
+
+
+def test_confirmation_invalid_selection_fails_closed() -> None:
+    """HITL 是审批边界：缺失或畸形选择不能退化成全量批准。"""
+    papers = [PaperMeta(title="A"), PaperMeta(title="B")]
+    kept = ingest_mod._apply_confirmation(papers, ["bad", 99])
+    assert kept == []
+    assert all(p.ingested for p in papers)
+
+
+def test_confirmation_keeps_only_valid_indices() -> None:
+    papers = [PaperMeta(title="A"), PaperMeta(title="B")]
+    kept = ingest_mod._apply_confirmation(papers, {"selected": ["1", -1, 9]})
+    assert [p.title for p in kept] == ["B"]
+    assert papers[0].ingested is True
+    assert papers[1].ingested is False
+
+
+def test_ingest_recovers_official_pdf_url_from_arxiv_id(monkeypatch) -> None:
+    paper = PaperMeta(title="Paper X", arxiv_id="1234.5678")
+    class CaptureTool(_FakeTool):
+        def __init__(self):
+            super().__init__([{"status": "ok", "chunks": 1}])
+            self.payloads = []
+
+        def invoke(self, payload):
+            self.payloads.append(payload)
+            return super().invoke(payload)
+
+    tool = CaptureTool()
+    monkeypatch.setattr(ingest_mod, "ingest_paper", tool)
+    state = create_initial_state("入库")
+    state["papers_to_ingest"] = [paper]
+    out = ingest_mod.ingest_node(state)
+
+    assert out["ingested_count"] == 1
+    assert tool.payloads[0]["pdf_url"] == "https://arxiv.org/pdf/1234.5678"

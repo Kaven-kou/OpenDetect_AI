@@ -47,3 +47,37 @@ def test_apply_filters_empty_result_falls_back_to_all() -> None:
     docs = [_doc("a", "1", published="2020-01-01")]
     out = retriever._apply_filters(docs, plan)
     assert out == docs
+
+
+def test_to_dict_preserves_pdf_element_metadata() -> None:
+    doc = Document(
+        page_content="## Figure 2: Architecture",
+        metadata={
+            "title": "Paper",
+            "page": 3,
+            "chunk_idx": 7,
+            "element_type": "figure",
+            "element_number": "2",
+            "element_title": "Architecture",
+            "reference_pages": "4,6",
+            "reference_count": 2,
+        },
+    )
+
+    result = retriever._to_dict(doc)
+    assert result["element_type"] == "figure"
+    assert result["element_number"] == "2"
+    assert result["reference_pages"] == "4,6"
+
+
+def test_llm_reranker_preserves_valid_empty_result(monkeypatch) -> None:
+    class FakeRunnable:
+        def invoke(self, _messages):
+            return retriever._RerankResult(relevant_indices=[])
+
+    class FakeLLM:
+        def with_structured_output(self, *_args, **_kwargs):
+            return FakeRunnable()
+
+    monkeypatch.setattr(retriever, "_get_llm", lambda: FakeLLM())
+    assert retriever._rerank_llm("unrelated", [_doc("A")], 5) == []

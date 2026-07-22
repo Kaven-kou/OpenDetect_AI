@@ -5,10 +5,10 @@
 
 from __future__ import annotations
 
-import operator
 from typing import Annotated, Any
 from dataclasses import dataclass, field
 from langchain_core.messages import BaseMessage
+from langgraph.graph.message import add_messages
 
 
 # ── 论文元数据结构 ─────────────────────────────────────────────
@@ -45,7 +45,9 @@ class AgentState(dict):
         error         : 任意节点出错时记录错误信息
     """
 
-    messages:         Annotated[list[BaseMessage], operator.add]
+    # add_messages 支持按 message.id 覆盖。AnswerGuard 因此能用核验后的回答
+    # 替换 RAG/Report 草稿，而不是让未通过核验的文本残留在会话历史中。
+    messages:         Annotated[list[BaseMessage], add_messages]
     user_query:       str            # 用户本轮原始输入（永不覆写，供日志/评测/回溯）
     resolved_query:   str            # 上游 resolve 出的自包含检索问题；下游用 effective_query() 读取
     pending_action:   dict[str, Any] | None  # 系统提出的待确认动作 {"kind","query"}；确认时消费、拒绝/新任务时清空
@@ -55,6 +57,7 @@ class AgentState(dict):
     ingested_count:   int
     rag_context:      list[dict[str, Any]]
     rag_answer:       str
+    verification:     dict[str, Any]  # AnswerGuard 结构化结果：状态、置信度、无支撑论断/引用
     final_report:     str
     error:            str
     search_attempted: bool
@@ -74,6 +77,11 @@ def effective_query(state: dict) -> str:
     return state.get("resolved_query") or state.get("user_query", "")
 
 
+def answer_message_id(state: dict) -> str:
+    """为本轮论文回答生成稳定 ID，供 AnswerGuard 原位替换草稿。"""
+    return f"answer:{state.get('thread_id', 'default')}:{len(state.get('messages', []))}"
+
+
 # ── 初始状态工厂函数 ───────────────────────────────────────────
 def create_initial_state(user_query: str) -> AgentState:
     """
@@ -91,6 +99,7 @@ def create_initial_state(user_query: str) -> AgentState:
         ingested_count=0,
         rag_context=[],
         rag_answer="",
+        verification={},
         final_report="",
         error="",
         local_pdf_path="",

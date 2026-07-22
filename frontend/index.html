@@ -243,6 +243,11 @@ svg { display: block; flex-shrink: 0; }
   transition: background 0.2s, color 0.2s;
 }
 .paper-badge.has-papers { background: var(--amber-pale); color: var(--amber-text); border: 1px solid var(--amber-border); }
+.memory-badge {
+  margin-left: auto; font-size: 10px; font-weight: 700; padding: 2px 8px;
+  border-radius: 99px; background: var(--border); color: var(--ink-3);
+}
+.memory-badge.on { background: var(--green-pale); color: var(--green); }
 
 /* ═══════════════════════════════════════════════
    MAIN
@@ -823,6 +828,15 @@ svg { display: block; flex-shrink: 0; }
       <span>文献库</span>
       <span class="paper-badge" id="paperBadge">0</span>
     </button>
+    <button class="btn-library" onclick="toggleMemory()" title="启用或关闭跨会话研究偏好记忆">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+        <path d="M9 4.5A3.5 3.5 0 0 0 5.5 8v1A3.5 3.5 0 0 0 4 15.37V16a4 4 0 0 0 4 4h1"/>
+        <path d="M15 4.5A3.5 3.5 0 0 1 18.5 8v1a3.5 3.5 0 0 1 1.5 6.37V16a4 4 0 0 1-4 4h-1"/>
+        <path d="M12 3v18"/>
+      </svg>
+      <span>长期记忆</span>
+      <span class="memory-badge" id="memoryBadge">...</span>
+    </button>
   </div>
 </aside>
 
@@ -1230,15 +1244,30 @@ function apiChatStream(query, threadId, h) {
 function apiChatResume(threadId, selection, h) {
   return streamSSE(`${API_BASE}/api/chat/resume`, { thread_id: threadId, selection, user_id: USER_ID }, h);
 }
-async function apiUploadPDF(file, title='') {
+async function apiUploadPDF(file, title='', threadId='upload') {
   const fd = new FormData();
   fd.append('file', file); fd.append('title', title);
+  fd.append('thread_id', threadId);
+  fd.append('user_id', USER_ID);
   const res = await fetch(`${API_BASE}/api/upload-pdf`, { method:'POST', body:fd });
   if (!res.ok) { const e = await res.json().catch(()=>({})); throw new Error(e.detail || `HTTP ${res.status}`); }
   return res.json();
 }
 async function apiFetchPapers() {
   const res = await fetch(`${API_BASE}/api/papers`);
+  return res.json();
+}
+async function apiFetchMemory() {
+  const res = await fetch(`${API_BASE}/api/user-profile?user_id=${encodeURIComponent(USER_ID)}`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+async function apiSetMemory(enabled) {
+  const res = await fetch(`${API_BASE}/api/user-profile/settings`, {
+    method:'PATCH', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({user_id:USER_ID, enabled}),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
 
@@ -1345,10 +1374,11 @@ async function handlePDFUpload(threadId) {
   const t = getActive();
   if (t) { const el = document.getElementById('messages'); const d = document.createElement('div'); d.innerHTML = renderMsg(t.messages[t.messages.length-1]); el.appendChild(d.firstElementChild); }
   clearStagedFile(); showLoading(); scrollToBottom();
-  const result = await apiUploadPDF(file, title);
+  const result = await apiUploadPDF(file, title, threadId);
   removeLoading();
+  const structureSummary = `识别 **${result.tables || 0}** 个表格、**${result.figures || 0}** 个带图注图片`;
   const content = result.status==='ok'
-    ? (result.skipped ? `**${result.title}** 已在文献库中，跳过重复入库。` : `**${result.title}** 入库成功！\n\n共切分为 **${result.chunks}** 个文本块，已写入向量数据库。`)
+    ? (result.skipped ? `**${result.title}** 已使用当前解析版本入库，跳过重复处理。` : `**${result.title}** ${result.reindexed ? '索引升级' : '入库'}成功！\n\n共解析 **${result.pages || 0}** 页，生成 **${result.chunks}** 个检索块，${structureSummary}。`)
     : `入库失败：${result.message||'未知错误'}`;
   addMessage(threadId, { role:'assistant', type:result.status==='ok'?'upload':'error', content, timestamp:new Date().toISOString() });
   renderMessages(); renderSidebar();
@@ -1441,6 +1471,25 @@ function updatePaperBadge(n) {
   b.textContent = n;
   b.classList.toggle('has-papers', n>0);
 }
+let memoryEnabled = true;
+async function refreshMemoryStatus() {
+  try {
+    const data = await apiFetchMemory();
+    memoryEnabled = data.settings?.enabled !== false;
+    const badge = document.getElementById('memoryBadge');
+    badge.textContent = memoryEnabled ? '开启' : '关闭';
+    badge.classList.toggle('on', memoryEnabled);
+  } catch(e) {}
+}
+async function toggleMemory() {
+  try {
+    const data = await apiSetMemory(!memoryEnabled);
+    memoryEnabled = data.settings.enabled;
+    await refreshMemoryStatus();
+  } catch(e) {
+    console.warn('更新记忆设置失败', e);
+  }
+}
 
 // ── Helpers ───────────────────────────────────────────────────
 function onKeyDown(e) { if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();onSend();} }
@@ -1472,7 +1521,7 @@ function formatFileSize(b) { if(b<1024) return b+' B'; if(b<1048576) return (b/1
 function init() {
   loadState();
   if (state.activeId && !state.threads.find(t=>t.id===state.activeId)) state.activeId = state.threads.length ? state.threads[0].id : null;
-  renderSidebar(); renderMessages(); initDragDrop(); refreshPaperCount();
+  renderSidebar(); renderMessages(); initDragDrop(); refreshPaperCount(); refreshMemoryStatus();
 }
 init();
 </script>

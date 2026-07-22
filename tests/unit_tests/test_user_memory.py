@@ -39,3 +39,34 @@ def test_migration_from_legacy_schema(monkeypatch, tmp_path) -> None:
     cols = [r[1] for r in conn.execute("PRAGMA table_info(user_profile)").fetchall()]
     conn.close()
     assert "user_id" in cols
+
+
+def test_memory_can_be_disabled_and_reenabled(monkeypatch, tmp_path) -> None:
+    _point_db(monkeypatch, tmp_path)
+    user_memory.save_user_profile("alice", {"research_interests": ["vision"]})
+    user_memory.set_memory_settings("alice", enabled=False)
+    assert user_memory.load_user_profile("alice") == {}
+
+    # 关闭期间的新提取不应写入；重新开启后旧数据仍由用户自行决定是否删除。
+    user_memory.save_user_profile("alice", {"research_interests": ["nlp"]})
+    user_memory.set_memory_settings("alice", enabled=True)
+    assert user_memory.load_user_profile("alice") == {"research_interests": ["vision"]}
+
+
+def test_memory_ttl_and_metadata(monkeypatch, tmp_path) -> None:
+    db = _point_db(monkeypatch, tmp_path)
+    user_memory.save_user_profile(
+        "alice", {"research_interests": ["vision"]}, source="explicit"
+    )
+    user_memory.set_memory_settings("alice", ttl_days=1)
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "UPDATE user_profile SET updated_at='2020-01-01T00:00:00+00:00' WHERE user_id='alice'"
+    )
+    conn.commit()
+    conn.close()
+
+    assert user_memory.load_user_profile("alice") == {}
+    entries = user_memory.list_memory_entries("alice")
+    assert entries[0]["source"] == "explicit"
+    assert entries[0]["updated_at"].startswith("2020-")

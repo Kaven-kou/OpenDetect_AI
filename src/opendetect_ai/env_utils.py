@@ -1,5 +1,5 @@
 """Environment variable loader for OpenDetect_AI."""
- 
+
 import os
 from dotenv import load_dotenv
  
@@ -43,6 +43,31 @@ OPENDETECT_RERANK_MIN_SCORE = float(os.getenv("OPENDETECT_RERANK_MIN_SCORE", "0.
 # ── Human-in-the-Loop ─────────────────────────────────
 # 入库前是否插入人工确认关卡（仅 Web/持久化会话生效），"false" 关闭
 OPENDETECT_HITL = os.getenv("OPENDETECT_HITL", "true").lower() == "true"
+OPENDETECT_APPROVAL_TTL_SECONDS = max(
+    60, int(os.getenv("OPENDETECT_APPROVAL_TTL_SECONDS", "1800"))
+)
+
+# PDF 入库安全上限：同时约束远程下载与本地上传，避免超大文件耗尽内存/磁盘。
+OPENDETECT_MAX_PDF_MB = max(1, int(os.getenv("OPENDETECT_MAX_PDF_MB", "50")))
+OPENDETECT_MAX_PDF_PAGES = max(1, int(os.getenv("OPENDETECT_MAX_PDF_PAGES", "200")))
+OPENDETECT_PDF_ALLOWED_HOSTS = {
+    host.strip().lower()
+    for host in os.getenv(
+        "OPENDETECT_PDF_ALLOWED_HOSTS",
+        "arxiv.org,export.arxiv.org,openaccess.thecvf.com,aclanthology.org",
+    ).split(",")
+    if host.strip()
+}
+
+# Web 默认只允许本地开发来源；生产环境通过逗号分隔显式配置。
+OPENDETECT_CORS_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv(
+        "OPENDETECT_CORS_ORIGINS",
+        "http://localhost:8000,http://127.0.0.1:8000",
+    ).split(",")
+    if origin.strip()
+]
 
 # ── Verifier（RAG 回答事实性校验）─────────────────────
 # RAG 生成后是否校验回答有无检索来源支撑、不足时降级提示，"false" 关闭
@@ -65,7 +90,7 @@ _REQUIRED = {
     "OPENDETECT_LLM_API_KEY":   OPENDETECT_LLM_API_KEY,
     "OPENDETECT_EMBED_API_KEY": OPENDETECT_EMBED_API_KEY,
 }
- 
+
 def validate_env() -> None:
     """项目启动时调用，检查必要环境变量是否齐全。"""
     missing = [k for k, v in _REQUIRED.items() if not v]
@@ -74,4 +99,3 @@ def validate_env() -> None:
             f"缺少必要的环境变量: {', '.join(missing)}\n"
             "请检查 .env 文件是否配置正确。"
         )
- 

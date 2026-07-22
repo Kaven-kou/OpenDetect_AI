@@ -8,7 +8,7 @@ from __future__ import annotations
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, AIMessage
 
-from opendetect_ai.state import AgentState, effective_query
+from opendetect_ai.state import AgentState, answer_message_id, effective_query
 from opendetect_ai.context_utils import build_context_str
 from opendetect_ai.tools.progress import push_progress
 from opendetect_ai.prompts import REPORT_PROMPT
@@ -50,7 +50,12 @@ def _format_papers_info(
         for i, chunk in enumerate(rag_chunks, 1):
             title    = chunk.get("title", "未知")
             content  = chunk.get("content", "")
-            lines.append(f"【段落 {i}】{title}\n{content}\n")
+            element_type = chunk.get("element_type", "text")
+            element_number = chunk.get("element_number", "")
+            kind_label = {"table": "表格", "figure": "图片"}.get(element_type, "段落")
+            if element_number:
+                kind_label += f" {element_number}"
+            lines.append(f"【{kind_label} {i}】{title}\n{content}\n")
 
     return "\n".join(lines)
 
@@ -109,5 +114,5 @@ def report_node(state: AgentState) -> dict:
         "final_report": report,
         "rag_context":  rag_chunks,
         "error":        "",
-        "messages":     [AIMessage(content=report)],
+        "messages":     [AIMessage(content=report, id=answer_message_id(state))],
     }

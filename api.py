@@ -10,6 +10,7 @@ OpenDetect AI — FastAPI 后端包装层
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import tempfile
@@ -20,14 +21,15 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from langchain_core.messages import AIMessage
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from opendetect_ai.tools.progress import drain_queue, cleanup_queue
+from opendetect_ai.env_utils import OPENDETECT_CORS_ORIGINS, OPENDETECT_MAX_PDF_MB
 
 app = FastAPI(title="OpenDetect AI", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=OPENDETECT_CORS_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -35,16 +37,22 @@ app.add_middleware(
 
 # ── 请求模型 ───────────────────────────────────────────────────
 class ChatRequest(BaseModel):
-    query: str
-    thread_id: str
-    user_id: str = "default"   # 长期记忆按此隔离；前端从 localStorage 传入
+    query: str = Field(min_length=1, max_length=20_000)
+    thread_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
+    user_id: str = Field(default="default", min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
 
 
 class ResumeRequest(BaseModel):
     """HITL 恢复请求：用户对「入库确认」的选择。"""
-    thread_id: str
+    thread_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
     selection: Any = None   # list[int]（保留的序号）| "all" | "none"
-    user_id: str = "default"
+    user_id: str = Field(default="default", min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
+
+
+class MemorySettingsRequest(BaseModel):
+    user_id: str = Field(default="default", min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
+    enabled: bool | None = None
+    ttl_days: int | None = None
 
 
 # ── 各节点的流式进度提示文本 ──────────────────────────────────
@@ -85,10 +93,22 @@ def _extract_answer(accumulated: dict) -> dict:
     messages      = accumulated.get("messages", []) or []
 
     if rag_answer:
-        return {"answer": rag_answer, "type": "rag", "ingested_count": ingested, "error": ""}
+        return {
+            "answer": rag_answer,
+            "type": "rag",
+            "ingested_count": ingested,
+            "error": "",
+            "verification": accumulated.get("verification") or {},
+        }
 
     if final_report:
-        return {"answer": final_report, "type": "report", "ingested_count": ingested, "error": ""}
+        return {
+            "answer": final_report,
+            "type": "report",
+            "ingested_count": ingested,
+            "error": "",
+            "verification": accumulated.get("verification") or {},
+        }
 
     if direct_answer:
         return {"answer": direct_answer, "type": "info", "ingested_count": ingested, "error": ""}
@@ -128,7 +148,12 @@ async def chat_endpoint(req: ChatRequest):
     """向 Agent 发送消息，返回最终回答（非流式）。"""
     try:
         from opendetect_ai.graph import chat as graph_chat
-        state = await asyncio.to_thread(graph_chat, req.query, req.thread_id)
+        state = await asyncio.to_thread(
+            graph_chat, req.query, req.thread_id, req.user_id, True
+        )
+        interrupts = state.get("_interrupts", []) if isinstance(state, dict) else []
+        if interrupts:
+            return {**interrupts[0], "type": "interrupt"}
         return _extract_answer(state if isinstance(state, dict) else {})
     except EnvironmentError as e:
         return JSONResponse(status_code=500,
@@ -166,16 +191,48 @@ async def upload_pdf(
     title: str      = Form(""),
     authors: str    = Form(""),
     published: str  = Form(""),
+    thread_id: str  = Form("upload"),
+    user_id: str    = Form("default"),
 ):
-    if not file.filename.lower().endswith(".pdf"):
+    filename = file.filename or ""
+    if not filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="只支持 PDF 文件")
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-        content = await file.read()
-        tmp.write(content)
-        tmp_path = tmp.name
+    allowed_mime = {"application/pdf", "application/x-pdf", "application/octet-stream", ""}
+    if (file.content_type or "").lower() not in allowed_mime:
+        raise HTTPException(status_code=400, detail="上传文件的 MIME 类型不是 PDF")
+    max_bytes = OPENDETECT_MAX_PDF_MB * 1024 * 1024
+    tmp_path = ""
     try:
+        total = 0
+        header = b""
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            tmp_path = tmp.name
+            while chunk := await file.read(1024 * 1024):
+                if len(header) < 5:
+                    header = (header + chunk)[:5]
+                total += len(chunk)
+                if total > max_bytes:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"PDF 不能超过 {OPENDETECT_MAX_PDF_MB} MB",
+                    )
+                tmp.write(chunk)
+        if header != b"%PDF-":
+            raise HTTPException(status_code=400, detail="文件内容不是有效的 PDF")
+
         from opendetect_ai.tools.rag_tool import ingest_local_pdf
-        effective_title = title.strip() or Path(file.filename).stem
+        from opendetect_ai.approval import record_explicit_approval
+        effective_title = title.strip() or Path(filename).stem
+        file_digest = hashlib.sha256(Path(tmp_path).read_bytes()).hexdigest()
+        await asyncio.to_thread(
+            record_explicit_approval,
+            action="upload_pdf",
+            payload={"title": effective_title, "filename": filename, "sha256": file_digest},
+            reason="用户主动选择并上传 PDF，将修改共享论文知识库。",
+            thread_id=thread_id,
+            user_id=user_id,
+            idempotency_key=file_digest,
+        )
         result = await asyncio.to_thread(ingest_local_pdf.invoke, {
             "file_path": tmp_path, "title": effective_title,
             "authors": authors, "published": published,
@@ -183,12 +240,16 @@ async def upload_pdf(
         return {
             "status":  result.get("status", "error"),
             "chunks":  result.get("chunks", 0),
+            "pages":   result.get("pages", 0),
+            "tables":  result.get("tables", 0),
+            "figures": result.get("figures", 0),
+            "reindexed": result.get("reindexed", False),
             "skipped": result.get("skipped", False),
             "title":   effective_title,
             "message": result.get("message", ""),
         }
     finally:
-        if os.path.exists(tmp_path):
+        if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
 
 
@@ -229,11 +290,9 @@ async def _sse_run(chat_graph, config, graph_input, thread_id):
                     last_state = payload
                     loop.call_soon_threadsafe(q.put_nowait, ("snapshot", payload))
                 elif stream_mode == "messages":
-                    msg_chunk, metadata = payload
-                    if "final_answer" in (metadata.get("tags") or []):
-                        text = getattr(msg_chunk, "content", "") or ""
-                        if text:
-                            loop.call_soon_threadsafe(q.put_nowait, ("token", text))
+                    # AnswerGuard 在生成完成后才运行。这里故意不向客户端发送模型草稿，
+                    # 避免未经核验的数字/结论被展示或复制。
+                    continue
             loop.call_soon_threadsafe(q.put_nowait, ("done", last_state))
         except Exception as exc:
             loop.call_soon_threadsafe(q.put_nowait, ("error", str(exc)))
@@ -243,40 +302,45 @@ async def _sse_run(chat_graph, config, graph_input, thread_id):
     prev_nodes: set = set()
     prev_ingested_count = None   # None=首帧只做基线，避免库已非空时误报「入库中」
 
-    while True:
-        kind, data = await q.get()
+    try:
+        while True:
+            kind, data = await q.get()
 
-        if kind == "snapshot":
-            last_snapshot = data if isinstance(data, dict) else {}
-            for think_msg in drain_queue(thread_id):
-                yield _sse({"type": "think", "message": think_msg})
+            if kind == "snapshot":
+                last_snapshot = data if isinstance(data, dict) else {}
+                for think_msg in drain_queue(thread_id):
+                    yield _sse({"type": "think", "message": think_msg})
 
-            cur_ingested = last_snapshot.get("ingested_count", 0) or 0
-            if last_snapshot.get("rag_answer") and "rag" not in prev_nodes:
-                prev_nodes.add("rag")
-                yield _sse({"type": "step", "agent": "rag", "message": _STEP_MESSAGES["rag"]})
-            elif last_snapshot.get("final_report") and "report" not in prev_nodes:
-                prev_nodes.add("report")
-                yield _sse({"type": "step", "agent": "report", "message": _STEP_MESSAGES["report"]})
-            elif prev_ingested_count is not None and cur_ingested > prev_ingested_count and "ingest" not in prev_nodes:
-                prev_nodes.add("ingest")
-                yield _sse({"type": "step", "agent": "ingest", "message": _STEP_MESSAGES["ingest"]})
-            elif last_snapshot.get("search_results") and "search" not in prev_nodes:
-                prev_nodes.add("search")
-                yield _sse({"type": "step", "agent": "search", "message": _STEP_MESSAGES["search"]})
-            prev_ingested_count = cur_ingested
+                cur_ingested = last_snapshot.get("ingested_count", 0) or 0
+                if last_snapshot.get("rag_answer") and "rag" not in prev_nodes:
+                    prev_nodes.add("rag")
+                    yield _sse({"type": "step", "agent": "rag", "message": _STEP_MESSAGES["rag"]})
+                elif last_snapshot.get("final_report") and "report" not in prev_nodes:
+                    prev_nodes.add("report")
+                    yield _sse({"type": "step", "agent": "report", "message": _STEP_MESSAGES["report"]})
+                elif prev_ingested_count is not None and cur_ingested > prev_ingested_count and "ingest" not in prev_nodes:
+                    prev_nodes.add("ingest")
+                    yield _sse({"type": "step", "agent": "ingest", "message": _STEP_MESSAGES["ingest"]})
+                elif last_snapshot.get("search_results") and "search" not in prev_nodes:
+                    prev_nodes.add("search")
+                    yield _sse({"type": "step", "agent": "search", "message": _STEP_MESSAGES["search"]})
+                prev_ingested_count = cur_ingested
 
-        elif kind == "token":
-            yield _sse({"type": "token", "text": data})
+            elif kind == "token":
+                yield _sse({"type": "token", "text": data})
 
-        elif kind == "done":
-            last_snapshot = data if isinstance(data, dict) else last_snapshot
-            break
+            elif kind == "done":
+                last_snapshot = data if isinstance(data, dict) else last_snapshot
+                break
 
-        else:  # error
-            yield _sse({"type": "error", "answer": str(data)})
-            await stream_task
-            return
+            else:  # error
+                yield _sse({"type": "error", "answer": str(data)})
+                await stream_task
+                return
+    except asyncio.CancelledError:
+        # to_thread 中的同步 graph.stream 无法被取消；等它安全落盘后再让外层释放会话锁。
+        await asyncio.shield(stream_task)
+        raise
 
     await stream_task
     for think_msg in drain_queue(thread_id):
@@ -296,6 +360,10 @@ async def _sse_run(chat_graph, config, graph_input, thread_id):
     answer = _extract_answer(last_snapshot)
     spawn_profile_extraction(last_snapshot.get("messages", []),
                              last_snapshot.get("user_id", "default"))
+    if answer.get("type") in {"rag", "report"} and answer.get("answer"):
+        verified_text = answer["answer"]
+        for start in range(0, len(verified_text), 96):
+            yield _sse({"type": "token", "text": verified_text[start:start + 96], "verified": True})
     done_payload = {"type": "done", "msg_type": answer.get("type", "info"),
                     **{k: v for k, v in answer.items() if k != "type"}}
     yield _sse(done_payload)
@@ -306,12 +374,17 @@ async def chat_stream_endpoint(req: ChatRequest):
     """向 Agent 发送消息，以 SSE 流式返回进度 / token / 中断 / 最终回答。"""
 
     async def generate():
+        execution_lock = None
+        lock_acquired = False
         try:
-            from opendetect_ai.graph import _get_chat_graph, build_turn_input
+            from opendetect_ai.graph import _get_chat_graph, build_turn_input, get_thread_lock
             from opendetect_ai.env_utils import validate_env
             validate_env()
 
             chat_graph = _get_chat_graph()
+            execution_lock = get_thread_lock(req.thread_id)
+            await asyncio.to_thread(execution_lock.acquire)
+            lock_acquired = True
             config = {
                 "configurable": {"thread_id": req.thread_id, "hitl": True},
                 "recursion_limit": 20,
@@ -327,6 +400,9 @@ async def chat_stream_endpoint(req: ChatRequest):
             yield _sse({"type": "error", "answer": f"环境配置错误: {exc}"})
         except Exception as exc:
             yield _sse({"type": "error", "answer": f"处理失败: {exc}"})
+        finally:
+            if execution_lock is not None and lock_acquired:
+                execution_lock.release()
 
     return StreamingResponse(generate(), media_type="text/event-stream", headers=SSE_HEADERS)
 
@@ -336,22 +412,46 @@ async def chat_resume_endpoint(req: ResumeRequest):
     """HITL 恢复：用户确认入库选择后，从 interrupt 处继续执行并继续流式。"""
 
     async def generate():
+        execution_lock = None
+        lock_acquired = False
         try:
-            from opendetect_ai.graph import _get_chat_graph
+            from opendetect_ai.graph import _get_chat_graph, get_thread_lock
             from langgraph.types import Command
             chat_graph = _get_chat_graph()
+            execution_lock = get_thread_lock(req.thread_id)
+            await asyncio.to_thread(execution_lock.acquire)
+            lock_acquired = True
             config = {
                 "configurable": {"thread_id": req.thread_id, "hitl": True},
                 "recursion_limit": 20,
             }
+            pending = await asyncio.to_thread(_pending_interrupts, chat_graph, config)
+            if not pending:
+                yield _sse({"type": "error", "answer": "该会话没有待处理审批，可能已完成或已恢复。"})
+                return
+            pending_user = pending[0].get("user_id")
+            if pending_user and pending_user != req.user_id:
+                yield _sse({"type": "error", "answer": "当前用户无权恢复该审批。"})
+                return
             async for chunk in _sse_run(
                 chat_graph, config, Command(resume=req.selection), req.thread_id
             ):
                 yield chunk
         except Exception as exc:
             yield _sse({"type": "error", "answer": f"处理失败: {exc}"})
+        finally:
+            if execution_lock is not None and lock_acquired:
+                execution_lock.release()
 
     return StreamingResponse(generate(), media_type="text/event-stream", headers=SSE_HEADERS)
+
+
+@app.get("/api/approvals")
+async def get_approvals(user_id: str = "default", limit: int = 50):
+    """查询当前用户的审批审计记录。"""
+    from opendetect_ai.approval import list_approvals
+    approvals = await asyncio.to_thread(list_approvals, user_id, limit)
+    return {"approvals": approvals, "total": len(approvals)}
 
 
 # ── 用户长期记忆 API ──────────────────────────────────────────
@@ -359,9 +459,15 @@ async def chat_resume_endpoint(req: ResumeRequest):
 async def get_user_profile(user_id: str = "default"):
     """获取指定用户的长期偏好记忆。"""
     try:
-        from opendetect_ai.user_memory import load_user_profile
+        from opendetect_ai.user_memory import (
+            get_memory_settings,
+            list_memory_entries,
+            load_user_profile,
+        )
         profile = await asyncio.to_thread(load_user_profile, user_id)
-        return {"profile": profile, "empty": not profile}
+        settings = await asyncio.to_thread(get_memory_settings, user_id)
+        entries = await asyncio.to_thread(list_memory_entries, user_id)
+        return {"profile": profile, "entries": entries, "settings": settings, "empty": not profile}
     except Exception as e:
         return {"profile": {}, "empty": True, "error": str(e)}
 
@@ -382,6 +488,22 @@ async def clear_user_profile(user_id: str = "default"):
         return {"status": "ok", "message": "用户记忆已清除"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+
+@app.patch("/api/user-profile/settings")
+async def update_memory_settings(req: MemorySettingsRequest):
+    """启用/关闭长期记忆，并设置可选 TTL。"""
+    try:
+        from opendetect_ai.user_memory import set_memory_settings
+        settings = await asyncio.to_thread(
+            set_memory_settings,
+            req.user_id,
+            enabled=req.enabled,
+            ttl_days=req.ttl_days,
+        )
+        return {"status": "ok", "settings": settings}
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"status": "error", "message": str(exc)})
 
 
 # ── 静态前端 ───────────────────────────────────────────────────

@@ -233,7 +233,9 @@ def _rerank_llm(query: str, docs: list[Document], k: int) -> list[Document]:
         if isinstance(result, dict):
             result = _RerankResult(**result)
         picked = [docs[i - 1] for i in result.relevant_indices if 1 <= i <= len(docs)]
-        return picked[:k] if picked else docs[:k]
+        # 空列表是有效的“无相关证据”判断，必须传递给上游触发拒答；
+        # 只有异常才降级到融合排序，不能把空结果误当成 reranker 故障。
+        return picked[:k]
     except Exception as exc:
         print(f"[Retriever] LLM 重排失败，退回融合序: {exc}")
         return docs[:k]
@@ -287,11 +289,17 @@ def _rerank(query: str, docs: list[Document], k: int) -> list[Document]:
 def _to_dict(doc: Document) -> dict:
     meta = doc.metadata or {}
     return {
-        "content":   doc.page_content,
-        "title":     meta.get("title", ""),
-        "arxiv_id":  meta.get("arxiv_id", ""),
-        "published": meta.get("published", ""),
-        "chunk_idx": meta.get("chunk_idx", 0),
+        "content":          doc.page_content,
+        "title":            meta.get("title", ""),
+        "arxiv_id":         meta.get("arxiv_id", ""),
+        "published":        meta.get("published", ""),
+        "page":             meta.get("page"),
+        "chunk_idx":        meta.get("chunk_idx", 0),
+        "element_type":     meta.get("element_type", "text"),
+        "element_number":   meta.get("element_number", ""),
+        "element_title":    meta.get("element_title", ""),
+        "reference_pages":  meta.get("reference_pages", ""),
+        "reference_count":  meta.get("reference_count", 0),
     }
 
 

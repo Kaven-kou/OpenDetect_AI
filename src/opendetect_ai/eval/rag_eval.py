@@ -12,18 +12,29 @@ RAG 检索评估 —— OpenDetect_AI
 指标：
 - Hit@1 / Hit@5 : top-k 中是否命中正确论文（召回是否正确）
 - MRR           : 正确论文首次出现位置的倒数（排序质量）
+- Recall@5      : 多 gold 问题中召回了多少篇正确论文
 - Precision@5   : top-k 中属于正确论文的比例（越高越聚焦）
+- nDCG@5        : 多 gold 的论文级排序质量
 - Noise@5       : top-k 中属于跨领域噪音论文的比例（越低越干净）★核心
 - CtxRelevant   : LLM 判定「检索内容是否足以回答问题」（0/1，可用 --no-judge 关闭）
+- P50/P95、失败率、平均结果数、检索侧 LLM 调用数：质量之外的成本与稳定性
 
 运行：
     make eval
     uv run python -m opendetect_ai.eval.rag_eval --no-judge   # 更快，跳过 LLM 判分
+    uv run python -m opendetect_ai.eval.rag_eval --dataset data/eval/questions.jsonl
+
+外部 JSONL 每行格式：
+    {"q": "问题", "gold": ["arxiv_id_1", "arxiv_id_2"]}
+
+传入 --dataset 时直接评估当前知识库，不再写入受控合成语料。
 """
 
 from __future__ import annotations
 
 import argparse
+import json
+from pathlib import Path
 
 from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage
@@ -193,6 +204,17 @@ def _precision_at(results, gold: set, k) -> float:
     return sum(1 for r in top if _norm(r.get("arxiv_id")) in gold) / len(top)
 
 
+def _recall_at(results, gold: set, k) -> float:
+    if not gold:
+        return 0.0
+    retrieved = {
+        _norm(r.get("arxiv_id"))
+        for r in results[:k]
+        if _norm(r.get("arxiv_id")) in gold
+    }
+    return len(retrieved) / len(gold)
+
+
 def _ndcg_at(results, gold: set, k) -> float:
     """论文级二值 nDCG@k：同一篇的多个 chunk 只算一次，避免 DCG 超过 IDCG。"""
     import math
@@ -245,39 +267,86 @@ def _pctl(values: list[float], p: float) -> float:
     return s[lo] + (s[hi] - s[lo]) * (idx - lo)
 
 
+def _load_questions(path: str) -> list[dict]:
+    """读取人工标注 JSONL；拒绝空问题和空 gold，避免产生虚高指标。"""
+    questions = []
+    with Path(path).open(encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"数据集第 {line_number} 行不是有效 JSON: {exc.msg}") from exc
+            question = item.get("q") or item.get("question")
+            gold = item.get("gold")
+            if not isinstance(question, str) or not question.strip():
+                raise ValueError(f"数据集第 {line_number} 行缺少非空 q/question")
+            if not isinstance(gold, list) or not gold or not all(isinstance(x, str) and x.strip() for x in gold):
+                raise ValueError(f"数据集第 {line_number} 行 gold 必须是非空字符串数组")
+            questions.append({"q": question.strip(), "gold": [_norm(x) for x in gold]})
+    if not questions:
+        raise ValueError("评测数据集为空")
+    return questions
+
+
 # ══════════════════════════════════════════════════════════════
 #   评估主流程
 # ══════════════════════════════════════════════════════════════
-def _eval_method(retrieve_fn, k: int, judge: bool) -> dict:
+def _eval_method(retrieve_fn, k: int, judge: bool, questions: list[dict] | None = None) -> dict:
     import time
     from opendetect_ai.tools import retriever
 
-    agg = {"hit@1": 0.0, "hit@5": 0.0, "mrr": 0.0, "prec@5": 0.0,
-           "ndcg@5": 0.0, "noise@5": 0.0, "ctx": 0.0}
+    questions = questions or _QUESTIONS
+    metric_k = max(1, k)
+    agg = {
+        "hit@1": 0.0,
+        f"hit@{metric_k}": 0.0,
+        "mrr": 0.0,
+        f"prec@{metric_k}": 0.0,
+        f"recall@{metric_k}": 0.0,
+        f"ndcg@{metric_k}": 0.0,
+        f"noise@{metric_k}": 0.0,
+        "ctx": 0.0,
+    }
     latencies, llm_calls = [], []
-    for item in _QUESTIONS:
-        gold = set(item["gold"])
+    failures = 0
+    result_counts = []
+    for item in questions:
+        gold = {_norm(g) for g in item["gold"]}
         calls_before = retriever._llm_call_count
         t0 = time.perf_counter()
-        results = retrieve_fn(item["q"], k)
+        try:
+            results = retrieve_fn(item["q"], metric_k)
+        except Exception:
+            results = []
+            failures += 1
         latencies.append((time.perf_counter() - t0) * 1000.0)   # ms
         llm_calls.append(retriever._llm_call_count - calls_before)
 
+        error_results = [r for r in results if "error" in r]
+        if error_results:
+            failures += 1
         results = [r for r in results if "error" not in r]
-        agg["hit@1"]   += _hit_at(results, gold, 1)
-        agg["hit@5"]   += _hit_at(results, gold, 5)
-        agg["mrr"]     += _mrr(results, gold)
-        agg["prec@5"]  += _precision_at(results, gold, 5)
-        agg["ndcg@5"]  += _ndcg_at(results, gold, 5)
-        agg["noise@5"] += _noise_at(results, 5)
+        result_counts.append(len(results))
+        agg["hit@1"] += _hit_at(results, gold, 1)
+        agg[f"hit@{metric_k}"] += _hit_at(results, gold, metric_k)
+        agg["mrr"] += _mrr(results, gold)
+        agg[f"prec@{metric_k}"] += _precision_at(results, gold, metric_k)
+        agg[f"recall@{metric_k}"] += _recall_at(results, gold, metric_k)
+        agg[f"ndcg@{metric_k}"] += _ndcg_at(results, gold, metric_k)
+        agg[f"noise@{metric_k}"] += _noise_at(results, metric_k)
         if judge:
             agg["ctx"] += _judge_relevance(item["q"], results)
 
-    n = len(_QUESTIONS)
+    n = len(questions)
     out = {m: v / n for m, v in agg.items()}
     out["p50_ms"] = _pctl(latencies, 0.50)
     out["p95_ms"] = _pctl(latencies, 0.95)
     out["llm_calls"] = sum(llm_calls) / n     # 平均每次检索的 LLM 调用数
+    out["failure_rate"] = failures / n
+    out["result_count"] = sum(result_counts) / n
+    out["question_count"] = n
     return out
 
 
@@ -285,26 +354,42 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="RAG 检索评估：baseline vs 新管线")
     parser.add_argument("--k", type=int, default=5)
     parser.add_argument("--no-judge", action="store_true", help="跳过 LLM 判分，更快")
+    parser.add_argument(
+        "--dataset",
+        help="人工标注 JSONL；设置后评估当前知识库，不装载仓库内受控语料",
+    )
     args = parser.parse_args()
 
     from opendetect_ai.env_utils import validate_env
     validate_env()
 
-    print("→ 装载受控基准语料（5 篇目标 + 4 篇跨领域噪音）...")
-    _seed_corpus()
+    if args.dataset:
+        questions = _load_questions(args.dataset)
+        benchmark = f"人工标注集 {args.dataset}"
+        print(f"→ 使用当前知识库评估 {benchmark}（{len(questions)} 题）...")
+    else:
+        questions = _QUESTIONS
+        benchmark = "受控合成基准"
+        print("→ 装载受控基准语料（5 篇目标 + 4 篇跨领域噪音）...")
+        _seed_corpus()
 
     from opendetect_ai.tools.retriever import retrieve, retrieve_dense_only
     judge = not args.no_judge
 
     print("→ 评估 baseline（纯稠密 top-k）...")
-    base = _eval_method(lambda q, k: retrieve_dense_only(q, k), args.k, judge)
+    base = _eval_method(lambda q, k: retrieve_dense_only(q, k), args.k, judge, questions)
     print("→ 评估 新管线（Hybrid + Self-Query + Rerank）...")
-    new = _eval_method(lambda q, k: retrieve(q, k), args.k, judge)
+    new = _eval_method(lambda q, k: retrieve(q, k), args.k, judge, questions)
 
-    metrics = ["hit@1", "hit@5", "mrr", "prec@5", "ndcg@5", "noise@5"] + (["ctx"] if judge else [])
-    better_when_low = {"noise@5"}
+    metric_k = max(1, args.k)
+    metrics = [
+        "hit@1", f"hit@{metric_k}", "mrr", f"prec@{metric_k}",
+        f"recall@{metric_k}", f"ndcg@{metric_k}", f"noise@{metric_k}",
+    ] + (["ctx"] if judge else [])
+    metrics = list(dict.fromkeys(metrics))
+    better_when_low = {f"noise@{metric_k}"}
 
-    print(f"\n评估集：{len(_QUESTIONS)} 题（含多 gold），受控合成基准；k={args.k}")
+    print(f"\n评估集：{len(questions)} 题（支持多 gold），{benchmark}；k={metric_k}")
     print("=" * 66)
     print(f"{'指标':<10}{'Baseline':>14}{'新管线':>14}{'Δ':>16}")
     print("-" * 66)
@@ -319,6 +404,8 @@ def main() -> None:
     print(f"{'P50 延迟':<10}{base['p50_ms']:>12.0f}ms{new['p50_ms']:>12.0f}ms")
     print(f"{'P95 延迟':<10}{base['p95_ms']:>12.0f}ms{new['p95_ms']:>12.0f}ms")
     print(f"{'LLM/次检索':<10}{base['llm_calls']:>14.1f}{new['llm_calls']:>14.1f}")
+    print(f"{'平均结果数':<10}{base['result_count']:>14.1f}{new['result_count']:>14.1f}")
+    print(f"{'失败率':<10}{base['failure_rate']:>14.2%}{new['failure_rate']:>14.2%}")
     print("=" * 66)
     print("注：noise@5 越低越好；其余质量指标越高越好。新管线用更高延迟 / 额外 LLM")
     print("    调用（self-query + rerank）换取更干净的召回——这是要如实权衡的成本面。")

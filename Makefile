@@ -42,7 +42,7 @@ route-eval:
 	uv run python -m opendetect_ai.eval.route_eval
 
 lint:
-	uv run python -m ruff check src tests
+	uv run python -m ruff check src tests api.py
 
 format:
-	uv run python -m ruff format src tests
+	uv run python -m ruff format src tests api.py

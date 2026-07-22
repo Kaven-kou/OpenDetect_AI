@@ -8,7 +8,7 @@ from __future__ import annotations
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, AIMessage
 
-from opendetect_ai.state import AgentState, effective_query
+from opendetect_ai.state import AgentState, answer_message_id, effective_query
 from opendetect_ai.context_utils import build_context_str
 from opendetect_ai.tools.progress import push_progress
 from opendetect_ai.agents.resolve import answer_offers_search, make_search_pending
@@ -39,9 +39,17 @@ def _format_context(chunks: list[dict]) -> str:
     for i, chunk in enumerate(chunks, 1):
         title     = chunk.get("title", "未知论文")
         arxiv_id  = chunk.get("arxiv_id", "")
+        page      = chunk.get("page")
         content   = chunk.get("content", "")
         source    = f"{title}（{arxiv_id}）" if arxiv_id else title
-        parts.append(f"【片段 {i}】来源: {source}\n{content}")
+        if page:
+            source += f"，第 {page} 页"
+        element_type = chunk.get("element_type", "text")
+        element_number = chunk.get("element_number", "")
+        kind_label = {"table": "表格", "figure": "图片"}.get(element_type, "正文")
+        if element_number:
+            kind_label += f" {element_number}"
+        parts.append(f"【{kind_label} {i}】来源: {source}\n{content}")
 
     return "\n\n---\n\n".join(parts)
 
@@ -100,7 +108,7 @@ def rag_node(state: AgentState) -> dict:
         "rag_context": chunks,
         "rag_answer":  answer,
         "error":       "",
-        "messages":    [AIMessage(content=answer)],
+        "messages":    [AIMessage(content=answer, id=answer_message_id(state))],
     }
     # 若回答是在「提议去搜索入库」（库里没有相关论文），写入 pending_action，
     # 下一轮用户回「好啊」时 resolve 节点会确定性地承接为一次搜索，无需再猜。

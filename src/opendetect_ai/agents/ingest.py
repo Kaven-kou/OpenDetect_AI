@@ -6,8 +6,8 @@ Ingest Agent —— OpenDetect_AI
 from __future__ import annotations
 
 from langchain_core.messages import AIMessage
-from langgraph.types import interrupt
 
+from opendetect_ai.approval import approval_required
 from opendetect_ai.state import AgentState, PaperMeta
 from opendetect_ai.tools.progress import push_progress
 from opendetect_ai.tools.rag_tool import ingest_local_pdf, ingest_paper
@@ -20,20 +20,21 @@ def _apply_confirmation(pending: list[PaperMeta], selection) -> list[PaperMeta]:
     """
     按用户的入库确认结果过滤待入库论文。
     selection:
-      - None / "all"           → 全部保留
-      - "none"                 → 全部放弃
+      - "all"                  → 全部保留
+      - None / "none"          → 全部放弃（审批边界默认拒绝）
       - list[int]（序号，0起） → 仅保留选中的；未选中的标记 ingested=True（视为已处理，不再重试）
     """
-    if selection is None or selection == "all":
+    if selection == "all":
         return pending
-    if selection == "none":
+    if selection is None or selection == "none":
         keep = set()
     elif isinstance(selection, dict):
-        keep = {int(i) for i in selection.get("selected", [])}
+        raw_selected = selection.get("selected", [])
+        keep = _valid_confirmation_indices(raw_selected, len(pending))
     elif isinstance(selection, (list, tuple)):
-        keep = {int(i) for i in selection}
+        keep = _valid_confirmation_indices(selection, len(pending))
     else:
-        return pending  # 未知格式，安全起见全部保留
+        keep = set()
 
     kept = []
     for i, p in enumerate(pending):
@@ -42,6 +43,21 @@ def _apply_confirmation(pending: list[PaperMeta], selection) -> list[PaperMeta]:
         else:
             p.ingested = True   # 用户未选，标记为已处理，避免重试
     return kept
+
+
+def _valid_confirmation_indices(values, size: int) -> set[int]:
+    """只接受范围内的整数序号；畸形值忽略，审批逻辑保持 fail-closed。"""
+    if not isinstance(values, (list, tuple, set)):
+        return set()
+    out: set[int] = set()
+    for value in values:
+        try:
+            idx = int(value)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= idx < size:
+            out.add(idx)
+    return out
 
 
 def ingest_node(state: AgentState) -> dict:
@@ -97,15 +113,22 @@ def ingest_node(state: AgentState) -> dict:
     # interrupt() 首次执行会暂停并把 payload 抛给前端；用户 resume 后返回其选择。
     hitl_on = OPENDETECT_HITL and bool(state.get("hitl"))
     if hitl_on:
-        selection = interrupt({
-            "action": "confirm_ingest",
+        approval_payload = {
             "prompt": "搜索到以下论文，请勾选要入库的（默认全选）：",
             "papers": [
                 {"idx": i, "title": p.title, "arxiv_id": p.arxiv_id,
                  "published": p.published, "authors": ", ".join(p.authors)}
                 for i, p in enumerate(pending)
             ],
-        })
+        }
+        selection = approval_required(
+            action="confirm_ingest",
+            payload=approval_payload,
+            reason="论文入库会持久化修改共享知识库，需要用户确认范围。",
+            thread_id=_tid,
+            user_id=state.get("user_id", "default"),
+            idempotency_key=str(len(state.get("messages", []))),
+        )
         pending = _apply_confirmation(pending, selection)
         if not pending:
             return {
@@ -119,9 +142,14 @@ def ingest_node(state: AgentState) -> dict:
 
     # ── 逐篇处理 ───────────────────────────────────────────────
     success, skipped_papers, failed = [], [], []
+    processed_ok_ids: set[int] = set()
 
     for paper in pending:
-        # 没有 PDF 链接则跳过
+        # 搜索结果偶发只有 arxiv_id 没有 pdf_url，可确定性恢复官方 PDF 地址。
+        if not paper.pdf_url and paper.arxiv_id:
+            paper.pdf_url = f"https://arxiv.org/pdf/{paper.arxiv_id}"
+
+        # 没有 PDF 链接且无法恢复则跳过
         if not paper.pdf_url:
             print(f"[Ingest] 跳过（无 PDF 链接）: {paper.title}")
             paper.ingested = True        # ← 加这行，标记已处理，不再重试
@@ -140,12 +168,18 @@ def ingest_node(state: AgentState) -> dict:
 
         if result.get("status") == "ok":
             paper.ingested = True
+            processed_ok_ids.add(id(paper))
             chunks = result.get("chunks", 0)
             skipped = result.get("skipped", False)
             if skipped:
                 skipped_papers.append(f"↩ {paper.title}（已存在，跳过）")
             else:
-                success.append(f"✓ {paper.title}（{chunks} 个文本块）")
+                tables = result.get("tables", 0)
+                figures = result.get("figures", 0)
+                detail = f"{chunks} 个检索块，{tables} 表格，{figures} 图片"
+                if result.get("reindexed"):
+                    detail += "，已升级旧索引"
+                success.append(f"✓ {paper.title}（{detail}）")
             push_progress(_tid, f"✓ 入库成功：{paper.title[:35]}（{chunks} 块）")
             print(f"[Ingest] 入库成功: {paper.title}，{chunks} 块")
         else:
@@ -173,8 +207,7 @@ def ingest_node(state: AgentState) -> dict:
 
     retriable_failed = []
     for p in pending:
-        was_success = any(p.title in s for s in success + skipped_papers)
-        if was_success:
+        if id(p) in processed_ok_ids:
             continue
 
         # 没有 arxiv_id 且 PDF 下载失败 → 付费墙/无开放获取，永远无法重试，直接放弃
